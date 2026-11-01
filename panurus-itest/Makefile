@@ -62,6 +62,15 @@ live-pp:
 live-scenario:
 	$(RDBI_HOME)/bin/rdbi-driver scenario
 
+# in the cluster (scripts/k8s.py): one pod per institution with its FSC nodes (and a bank's own committer), PVC per pod
+IMAGE ?= ghcr.io/radityaaa43/rdbi-node:$(shell cat $(RDBI_HOME)/bin/rdbi-node $(RDBI_HOME)/bin/rdbi-driver 2>/dev/null | sha256sum | cut -c1-12)
+live-image:
+	docker build -f k8s/Dockerfile -t $(IMAGE) $(RDBI_HOME)/bin && docker push $(IMAGE)
+live-k8s:
+	IMAGE=$(IMAGE) python3 -I scripts/k8s.py apply
+live-seed: # once, with the Deployments at 0 (`scripts/k8s.py apply 0`) and the local nodes stopped
+	IMAGE=$(IMAGE) python3 -I scripts/k8s.py seed
+
 # one committer per bank on this host (../multiorg/committer); needs live-enroll and the forward shim (live-start)
 live-committers:
 	../multiorg/committer/committer.sh up

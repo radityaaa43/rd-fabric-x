@@ -7,12 +7,14 @@ from every other participant (zero-knowledge proofs, Idemix pseudonyms).
 Every institution is its own organisation and runs its own orderer party, committer and FSC endorser, so banks keep
 transacting while BI or any one bank is down:
 
-| Institution | Orderer party (Arma BFT) | MSP | CA | Committer | FSC nodes |
+Everything runs in the cluster, k8s namespace `fabricx` (since 2026-11-02, `scripts/k8s.py`):
+
+| Institution | Orderer party (Arma BFT) | MSP | CA | Committer | FSC nodes (pod) |
 |---|---|---|---|---|---|
-| BI | 1 | `Org1MSP` | `fca-org1` | cluster (`committer-*`, NodePorts 30560/30580) | `issuer`, `endorser-1` |
-| Bank A | 2 | `OrdererOrg2MSP` | `fca-orderer-org2` | `committer-bank2` (127.0.0.1:25130/25140) | `bank2`, `endorser-2` |
-| Bank B | 3 | `OrdererOrg3MSP` | `fca-orderer-org3` | `committer-bank3` (127.0.0.1:35130/35140) | `bank3`, `endorser-3` |
-| Bank C | 4 | `OrdererOrg4MSP` | `fca-orderer-org4` | `committer-bank4` (127.0.0.1:45130/45140) | `bank4`, `endorser-4` |
+| BI | 1 | `Org1MSP` | `fca-org1` | `committer-*` (sidecar, coordinator, validator, verifier, query, DB) | `issuer`, `endorser-1` (`rdbi-bi`) |
+| Bank A | 2 | `OrdererOrg2MSP` | `fca-orderer-org2` | in pod `rdbi-bank2` | `bank2`, `endorser-2` (`rdbi-bank2`) |
+| Bank B | 3 | `OrdererOrg3MSP` | `fca-orderer-org3` | in pod `rdbi-bank3` | `bank3`, `endorser-3` (`rdbi-bank3`) |
+| Bank C | 4 | `OrdererOrg4MSP` | `fca-orderer-org4` | in pod `rdbi-bank4` | `bank4`, `endorser-4` (`rdbi-bank4`) |
 
 - Token namespace `rd_dfabi`: endorsement policy `OutOf(3, Org1MSP, OrdererOrg2MSP, OrdererOrg3MSP, OrdererOrg4MSP)`.
 - Channel `LifecycleEndorsement` (who may create or change a namespace): all four organisations.
@@ -38,14 +40,28 @@ report fails and the transaction stays final.
 
 This is a detective control: a bank can delay or withhold a report, and BI finds it with the reconciliation.
 
-## Committer per bank
+## Cluster deployment (`scripts/k8s.py`)
 
-`../multiorg/committer` runs Fabric-X committer 1.0.4 (sidecar, coordinator, validator-committer, verifier, query
-service, Postgres) per bank with docker compose on this host: `committer.sh up|down|status [bank…]`
-(`make live-committers`). Each pulls blocks from the four assemblers (NodePorts 30052..30352,
-`assembler-nodeports.yaml`, forwarded through the docker bridge by the forward shim because the config block names
-them by their in-cluster names) and signs as `committer-<bank>` from the bank's CA. A bank's FSC nodes read the
-ledger only from their own committer (`assemble.py`; `BANK_COMMITTERS=0` points them back at BI's).
+One pod per institution in namespace `fabricx`, each with one PVC (`alicloud-essd-wffc`, 2Gi, zone
+ap-southeast-5b where the member nodes with free disk slots are) for its node stores, sidecar ledger and Postgres:
+
+- `rdbi-bi`: `issuer`, `endorser-1`; reads BI's committer (`committer-sidecar`, `committer-query-service`).
+- `rdbi-bank2..4`: the bank's FSC node and endorser plus its own Fabric-X committer 1.0.4 (sidecar, coordinator,
+  validator-committer, verifier, query service, Postgres) on localhost ports 61xx/62xx, pulling blocks from the four
+  assemblers by their in-cluster names and signing as `committer-<bank>` from the bank's CA.
+- `rdbi-driver`: `rdbi-driver` for tests: `kubectl -n fabricx exec deploy/rdbi-driver -- rdbi-driver scenario`.
+- One Service per FSC node, named after the node (`issuer`, `bank2`, `endorser-1`, ...): the node TLS certificates
+  carry the node name. Node and committer keys are in the Secrets `rdbi-*-files` (packed from `$RDBI_HOME` by the
+  script on stdin, unpacked by an init container); the Postgres passwords stay in `$RDBI_HOME/k8s`.
+
+```
+make live-build live-image   # binaries, then image ghcr.io/radityaaa43/rdbi-node:<hash of the binaries>
+make live-k8s                # Secrets, PVCs, Services, Deployments (IMAGE=...)
+```
+
+`scripts/k8s.py seed` copied the node stores from this host into the PVCs once (2026-11-02, md5 per file
+checked; backup `$RDBI_HOME/backup/2026-11-02-pre-k8s`). The host-based mode (`make live-start`, bank committers
+with docker compose in `../multiorg/committer`, assembler NodePorts) is no longer running.
 
 | What | Where |
 |---|---|
@@ -137,16 +153,22 @@ With a committer per bank and reports to BI (2026-11-01, later):
 - Reconciliation found a transaction no one had reported (a transfer from a test run) until `driver report` sent it;
   at the end 48 of 48 token transactions on the ledger are confirmed in BI's audit store.
 
+In the cluster (2026-11-02, `rdbi-*` pods, driver in the cluster): scenario, BI fully down (`rdbi-bi` and BI's
+committer and orderer party 1 scaled to 0: transfers and DvP final, then reports caught up 82/82), Bank C fully down
+(`rdbi-bank4` at 0), BI and Bank C down together (refused, no balance moved), negative cases, regression; all four
+committers at the same height; reconciliation 101 of 101.
+
 ## Known limits
 
 - Reporting is detective, not preventive: BI sees a bank-to-bank transaction only after the bank reports it, and
   finds a missing report with the reconciliation (which reads BI's own committer).
 - Issuance and burn need BI (issuer).
-- An FSC node exits if its committer's query service is unreachable at start; start the committer first.
+- An FSC node exits if its committer is unreachable at start; in the cluster it waits for it.
+- The negative cases expect bank4 to hold nothing; empty it first after tests that pay bank4.
 - A failed DvP can leave the payer's tokens locked: the sherdlock lease cleanup did not release them on the node's
   SQLite store (rows matched the stale rule but were not deleted); they were released by hand. Root cause not found.
 - `scripts/e2e.sh`, `scripts/verify_privacy.py` and `rdbi/rdbi_test.go` still assume the auditor design.
-- The nodes and the banks' committers run on one host; the institutions are separate organisations with separate
-  keys and databases, and the lab operator holds all CA registrar credentials (logical, not operational, separation).
+- All institutions run in one cluster namespace; they are separate organisations with separate keys and databases,
+  and the lab operator holds all CA registrar credentials and cluster access (logical, not operational, separation).
 - Ledger readers see that a token transaction happened (time, size, input ids: NOGH does not hide the spending graph).
 - `fxconfig ... --wait` and the sidecar notification stream can hit gRPC `too_many_pings`.

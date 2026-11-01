@@ -18,7 +18,20 @@ out = subprocess.check_output(["kubectl", "-n", "fabricx", "exec", "committer-db
 prefix = "\\000tr\\000"
 ledger = {k[len(prefix):len(prefix) + 64] for k in out.split() if k.startswith(prefix)}
 
-db = sqlite3.connect(f"file:{os.path.join(H, 'live', 'issuer', 'data', 'default.sqlite')}?mode=ro", uri=True)
+local = os.path.join(H, "live", "issuer", "data", "default.sqlite")
+if subprocess.run(["kubectl", "-n", "fabricx", "get", "deploy", "rdbi-bi"], capture_output=True).returncode == 0:
+    # BI's node runs in the cluster (scripts/k8s.py): read a consistent copy of its store (sqlite backup API)
+    import tempfile
+    tmp = tempfile.mkdtemp()
+    local = os.path.join(tmp, "issuer.sqlite")
+    with open(local, "wb") as f:
+        f.write(subprocess.check_output(["kubectl", "-n", "fabricx", "exec", "deploy/rdbi-bi", "-c", "issuer", "--", "sh", "-c",
+                                         f"cat {'/home/rdbi/.fabricx-token/live/issuer/data/default.sqlite'}"]))
+    for ext in ("-wal",):  # the write-ahead log holds the latest records
+        with open(local + ext, "wb") as f:
+            f.write(subprocess.check_output(["kubectl", "-n", "fabricx", "exec", "deploy/rdbi-bi", "-c", "issuer", "--", "sh", "-c",
+                                             f"cat /home/rdbi/.fabricx-token/live/issuer/data/default.sqlite{ext} 2>/dev/null || true"]))
+db = sqlite3.connect(local)
 table = f"fsc_default__arma__{NS.replace('_', '__')}__aud_requests"
 audit = dict(db.execute(f'select tx_id, status from "{table}"'))  # status 2 = confirmed against the ledger
 
