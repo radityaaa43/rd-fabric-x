@@ -1,0 +1,16 @@
+server:
+  endpoint: :5110
+  tls: &tls
+    mode: mtls
+    cert-path: /config/tls/server.crt
+    key-path: /config/tls/server.key
+    ca-cert-paths: [/config/tls/ca.crt]
+monitoring:
+  endpoint: :5210
+  tls: *tls
+batch-size-cutoff: 50
+batch-time-cutoff: 10ms
+channel-buffer-size: 50
+parallelism: 8
+logging:
+  logSpec: info:grpc=error

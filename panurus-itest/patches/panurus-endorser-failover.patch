@@ -1,0 +1,179 @@
+diff --git a/token/services/network/fabric/endorsement/fsc/service.go b/token/services/network/fabric/endorsement/fsc/service.go
+index badf984..74b7ff0 100644
+--- a/token/services/network/fabric/endorsement/fsc/service.go
++++ b/token/services/network/fabric/endorsement/fsc/service.go
+@@ -140,6 +140,35 @@ func (e *EndorsementService) Endorse(context view.Context, requestRaw []byte, si
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	env, err := e.requestApproval(context, requestRaw, txID, metadata, endorsers)
++	if err == nil || e.PolicyType != NamespacePolicy {
++		return env, err
++	}
++	// The namespace selector picks a random policy-satisfying set and does not know which endorsers
++	// are reachable. When that set fails, select again without each configured endorser in turn, so a
++	// policy that tolerates one missing organisation (e.g. 3-of-4) still succeeds when one endorser is down.
++	// ponytail: handles one unreachable endorser; more would need enumerating larger exclusion sets.
++	failures := []error{err}
++	for i := range e.Endorsers {
++		rest := append(append([]view.Identity{}, e.Endorsers[:i]...), e.Endorsers[i+1:]...)
++		selected, err := e.EndorserSelector.SelectEndorsers(context.Context(), e.TmsID, rest)
++		if err != nil {
++			failures = append(failures, err)
++
++			continue
++		}
++		logger.Warnf("endorsement failed, retrying without configured endorser [%d]", i)
++		env, err := e.requestApproval(context, requestRaw, txID, metadata, selected)
++		if err == nil {
++			return env, nil
++		}
++		failures = append(failures, err)
++	}
++
++	return nil, errors.Join(failures...)
++}
++
++func (e *EndorsementService) requestApproval(context view.Context, requestRaw []byte, txID driver.TxID, metadata driver.TransientMap, endorsers []view.Identity) (driver.Envelope, error) {
+ 	logger.DebugfContext(context.Context(), "request approval via panurus endorsers with policy [%s]: [%d]...", e.PolicyType, len(endorsers))
+ 
+ 	envBoxed, err := e.ViewManager.InitiateView(context.Context(), NewRequestApprovalView(
+diff --git a/token/services/network/fabric/endorsement/fsc/service_test.go b/token/services/network/fabric/endorsement/fsc/service_test.go
+index 170e5ee..c9dc7b9 100644
+--- a/token/services/network/fabric/endorsement/fsc/service_test.go
++++ b/token/services/network/fabric/endorsement/fsc/service_test.go
+@@ -491,6 +491,36 @@ func TestEndorsementService_Endorse(t *testing.T) {
+ 		assert.Equal(t, service.Endorsers, gotConfigured)
+ 	})
+ 
++	t.Run("success - NamespacePolicy retries without an unreachable endorser", func(t *testing.T) {
++		ctx := &mock.Context{}
++		ctx.ContextReturns(context.Background())
++
++		// a 3-of-4 policy: the selector takes the first three configured endorsers
++		selector := &mock.EndorserSelector{}
++		selector.SelectEndorsersStub = func(_ context.Context, _ token.TMSID, configured []view.Identity) ([]view.Identity, error) {
++			return configured[:3], nil
++		}
++		viewManager := &downViewManager{down: "endorser2", result: &mock.Envelope{}}
++		service := &fsc.EndorsementService{
++			TmsID: tmsID,
++			Endorsers: []view.Identity{
++				[]byte("endorser1"), []byte("endorser2"), []byte("endorser3"), []byte("endorser4"),
++			},
++			ViewManager:      viewManager,
++			PolicyType:       fsc.NamespacePolicy,
++			EndorserService:  &mock.EndorserService{},
++			EndorserSelector: selector,
++		}
++
++		env, err := service.Endorse(ctx, []byte("request"), []byte("signer"), driver.TxID{}, nil)
++
++		require.NoError(t, err)
++		require.NotNil(t, env)
++		// first selection and the retry without endorser1 both contain endorser2; the one without it succeeds
++		assert.Equal(t, 3, viewManager.calls)
++		assert.Equal(t, []view.Identity{[]byte("endorser1"), []byte("endorser3"), []byte("endorser4")}, viewManager.last)
++	})
++
+ 	t.Run("failed - NamespacePolicy selector error", func(t *testing.T) {
+ 		ctx := &mock.Context{}
+ 		ctx.ContextReturns(context.Background())
+@@ -1012,6 +1042,26 @@ func (m *mockViewManager) InitiateView(ctx context.Context, view view.View) (any
+ 	return m.initiateViewResult, m.initiateViewError
+ }
+ 
++// downViewManager fails every approval request that includes the endorser named down.
++type downViewManager struct {
++	down   string
++	result any
++	calls  int
++	last   []view.Identity
++}
++
++func (m *downViewManager) InitiateView(_ context.Context, v view.View) (any, error) {
++	m.calls++
++	m.last = v.(*fsc.RequestApprovalView).Endorsers
++	for _, id := range m.last {
++		if string(id) == m.down {
++			return nil, errors.New("endorser unreachable")
++		}
++	}
++
++	return m.result, nil
++}
++
+ type mockIdentityProvider struct {
+ 	identities map[string]view.Identity
+ }
+diff --git a/token/services/storage/endorserdb/store.go b/token/services/storage/endorserdb/store.go
+index 47d16b8..83a818d 100644
+--- a/token/services/storage/endorserdb/store.go
++++ b/token/services/storage/endorserdb/store.go
+@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
+ package endorserdb
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"reflect"
+ 
+@@ -119,6 +120,21 @@ func (d *StoreService) ValidationRecords(ctx context.Context, params QueryValida
+ 	return &ValidationRecordsIterator{it: it}, nil
+ }
+ 
++// hasValidationRecord reports whether txID already has a validation record for exactly tokenRequest.
++// ponytail: scans all records; only runs after a failed insert (a retried endorsement), add a txid query if it gets hot.
++func (d *StoreService) hasValidationRecord(ctx context.Context, txID string, tokenRequest []byte) bool {
++	it, err := d.ValidationRecords(ctx, QueryValidationRecordsParams{Filter: func(r *ValidationRecord) bool {
++		return r.TxID == txID && bytes.Equal(r.TokenRequest, tokenRequest)
++	}})
++	if err != nil {
++		return false
++	}
++	defer it.Close()
++	r, err := it.Next()
++
++	return err == nil && r != nil
++}
++
+ // AppendValidationRecord appends the given validation metadata related to the given transaction id.
+ //
+ // Verification: tokenRequest is expected to have been validated against the
+@@ -152,6 +168,11 @@ func (d *StoreService) AppendValidationRecord(ctx context.Context, txID string,
+ 	// Store the token request directly in the validation record
+ 	if err := w.AddValidationRecord(ctx, txID, tokenRequest, meta, ppHash); err != nil {
+ 		w.Rollback()
++		// An endorsement retried after another endorser was unreachable asks again for the same txid; the
++		// identical request is already recorded, so that is not an error. A different request is still refused.
++		if d.hasValidationRecord(ctx, txID, tokenRequest) {
++			return nil
++		}
+ 
+ 		return errors.WithMessagef(err, "append validation record for txid [%s] failed", txID)
+ 	}
+diff --git a/token/services/storage/endorserdb/store_test.go b/token/services/storage/endorserdb/store_test.go
+index a5cb2de..dadad80 100644
+--- a/token/services/storage/endorserdb/store_test.go
++++ b/token/services/storage/endorserdb/store_test.go
+@@ -72,6 +72,20 @@ func TestDB(t *testing.T) {
+ 	require.NoError(t, err)
+ }
+ 
++// TestAppendValidationRecord_RetrySameRequest: an endorsement retried for the same txid and request is
++// accepted again; a different request under that txid is still refused.
++func TestAppendValidationRecord_RetrySameRequest(t *testing.T) {
++	ctx := t.Context()
++	manager := newStoreServiceManager(t)
++	store, err := manager.StoreServiceByTMSId(token.TMSID{Network: "pineapple", Namespace: "ns"})
++	require.NoError(t, err)
++
++	tr := actionsTokenRequest(t, "tr")
++	require.NoError(t, store.AppendValidationRecord(ctx, "retry-1", tr, nil, driver2.PPHash("pp")))
++	require.NoError(t, store.AppendValidationRecord(ctx, "retry-1", tr, nil, driver2.PPHash("pp")))
++	require.Error(t, store.AppendValidationRecord(ctx, "retry-1", actionsTokenRequest(t, "other"), nil, driver2.PPHash("pp")))
++}
++
+ // TestValidationRecordsLifecycle exercises the facade end to end against SQLite:
+ // AppendValidationRecord, GetStatus, SetStatus and ValidationRecords.
+ func TestValidationRecordsLifecycle(t *testing.T) {

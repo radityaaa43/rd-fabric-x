@@ -1,0 +1,43 @@
+# A bank's committer, after cmd/config/samples of fabric-x-committer v1.0.4. One TLS certificate per bank, issued
+# by the bank's CA, serves all components (mTLS between them, as the sample). Per-bank values come from compose.yaml
+# environment (SC_SIDECAR_ORDERER_IDENTITY_MSP_ID).
+server:
+  endpoint: :5130
+  tls: &tls
+    mode: mtls
+    cert-path: /config/tls/server.crt
+    key-path: /config/tls/server.key
+    ca-cert-paths: [/config/tls/ca.crt]
+  keep-alive:
+    params: {time: 300s, timeout: 600s}
+    enforcement-policy: {min-time: 60s, permit-without-stream: false}
+monitoring:
+  endpoint: :5230
+  tls: *tls
+orderer:
+  fault-tolerance-level: BFT
+  latest-known-config-block-path: /config/config-block.pb.bin
+  tls: # client side; the orderers' TLS root CAs come from the config block
+    mode: mtls
+    cert-path: /config/tls/server.crt
+    key-path: /config/tls/server.key
+  suspicion-grace-period-per-block: 1s
+  identity:
+    msp-id: set-by-environment
+    msp-dir: /config/msp
+    bccsp: {Default: SW, SW: {Security: 256, Hash: SHA2}}
+committer:
+  endpoint: coordinator:5120
+  tls: *tls
+ledger:
+  path: /data/ledger
+  sync-interval: 100
+notification:
+  max-timeout: 10m
+  max-active-tx-ids: 100000
+  max-tx-ids-per-request: 1000
+last-committed-block-set-interval: 5s
+waiting-txs-limit: 20000000
+channel-buffer-size: 100
+logging:
+  logSpec: info:grpc=error

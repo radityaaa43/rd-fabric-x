@@ -1,0 +1,52 @@
+# One bank's committer (Fabric-X committer 1.0.4 and its Postgres) on this host. Started by committer.sh, which
+# sets BANK, MSP, PORT, CFG, DATA, UID_GID and DB_PASSWORD. Only the sidecar (<PORT>130) and the query service
+# (<PORT>140) are published, on 127.0.0.1, for the bank's own FSC nodes.
+name: committer-${BANK}
+
+x-committer: &committer
+  image: docker.io/hyperledger/fabric-x-committer:1.0.4
+  user: ${UID_GID}
+  restart: unless-stopped
+  volumes: ["${CFG}:/config:ro"]
+
+services:
+  db:
+    image: postgres:17.10-alpine
+    restart: unless-stopped
+    environment: {POSTGRES_USER: committer, POSTGRES_DB: committer, POSTGRES_PASSWORD: "${DB_PASSWORD}"}
+    volumes: ["db:/var/lib/postgresql/data"]
+    healthcheck: {test: [CMD, pg_isready, -U, committer], interval: 2s, retries: 30}
+  verifier:
+    <<: *committer
+    command: [start, verifier, --config=/config/verifier.yaml]
+  vc:
+    <<: *committer
+    command: [start, vc, --config=/config/vc.yaml]
+    environment: {SC_VC_DATABASE_PASSWORD: "${DB_PASSWORD}"}
+    depends_on: {db: {condition: service_healthy}}
+  coordinator:
+    <<: *committer
+    command: [start, coordinator, --config=/config/coordinator.yaml]
+    depends_on: [verifier, vc]
+  sidecar:
+    <<: *committer
+    command: [start, sidecar, --config=/config/sidecar.yaml]
+    environment: {SC_SIDECAR_ORDERER_IDENTITY_MSP_ID: "${MSP}"}
+    volumes: ["${CFG}:/config:ro", "${DATA}:/data"]
+    # the config block names the assemblers by their in-cluster names; the host forwards them to the NodePorts
+    extra_hosts:
+      - orderer-assembler-1.fabricx.svc.cluster.local:host-gateway
+      - orderer-assembler-2.fabricx.svc.cluster.local:host-gateway
+      - orderer-assembler-3.fabricx.svc.cluster.local:host-gateway
+      - orderer-assembler-4.fabricx.svc.cluster.local:host-gateway
+    ports: ["127.0.0.1:${PORT}130:5130"]
+    depends_on: [coordinator]
+  query:
+    <<: *committer
+    command: [start, query, --config=/config/query.yaml]
+    environment: {SC_QUERY_DATABASE_PASSWORD: "${DB_PASSWORD}"}
+    ports: ["127.0.0.1:${PORT}140:5140"]
+    depends_on: [vc]
+
+volumes:
+  db:

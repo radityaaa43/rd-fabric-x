@@ -1,0 +1,40 @@
+diff --git a/token/services/ttx/collectendorsements.go b/token/services/ttx/collectendorsements.go
+index 875eda6..a1d1463 100644
+--- a/token/services/ttx/collectendorsements.go
++++ b/token/services/ttx/collectendorsements.go
+@@ -382,26 +382,17 @@ func (c *CollectEndorsementsView) requestSignatures(signers []view.Identity, ver
+ 		}
+ 	}
+ 
+-	// Remote parties are independent, fan out their round-trips so total latency
+-	// tracks the slowest party instead of the sum. Workers share no state: the
+-	// sigmas map is populated here from the collected answers.
+-	if len(remoteSigners) > 0 {
+-		logger.DebugfContext(context.Context(), "request [%d] remote signatures concurrently", len(remoteSigners))
+-		remoteSigmas, err := fanOut(context.Context(), len(remoteSigners), func(i int) ([]byte, error) {
+-			party := remoteSigners[i]
+-			sigma, err := c.signRemote(context, party, &SignatureRequest{TX: txRaw, Signer: party}, requestRaw, verifierGetter)
+-			if err != nil {
+-				return nil, errors.WithMessagef(err, "failed signing remote for party [%s]", party)
+-			}
+-
+-			return sigma, nil
+-		})
++	// Remote signatures are requested one after the other. remoteSigners is deduplicated by signer
++	// identity, but one node can own several of them (a counterparty paying with two tokens has two
++	// anonymous owner identities). Requested concurrently, those share the node's session and the
++	// responder (EndorseView), which reads the requests in order, gets them interleaved: "signer
++	// identity mismatch". ponytail: latency is the sum over parties; group by node to parallelise again.
++	for _, party := range remoteSigners {
++		sigma, err := c.signRemote(context, party, &SignatureRequest{TX: txRaw, Signer: party}, requestRaw, verifierGetter)
+ 		if err != nil {
+-			return nil, err
+-		}
+-		for i, party := range remoteSigners {
+-			sigmas[party.UniqueID()] = remoteSigmas[i]
++			return nil, errors.WithMessagef(err, "failed signing remote for party [%s]", party)
+ 		}
++		sigmas[party.UniqueID()] = sigma
+ 	}
+ 	logger.DebugfContext(context.Context(), "Done signing")
+ 

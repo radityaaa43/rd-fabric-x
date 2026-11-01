@@ -1,0 +1,50 @@
+diff --git a/token/core/common/authorization.go b/token/core/common/authorization.go
+index 3ec0582..1333974 100644
+--- a/token/core/common/authorization.go
++++ b/token/core/common/authorization.go
+@@ -54,6 +54,18 @@ func NewTMSAuthorization(logger logging.Logger, publicParameters driver.PublicPa
+ 		}
+ 		errs = append(errs, errors.Wrapf(err, "I'm not this auditor identity [%s]", identity))
+ 	}
++	// Without auditors no transfer waits for an auditor; the issuer can still collect the transactions reported
++	// to it after finality. It then keeps their outputs as audit tokens, which the audit check of a later report
++	// needs for that report's inputs.
++	if len(publicParameters.Auditors()) == 0 {
++		for _, identity := range publicParameters.Issuers() {
++			if _, err := walletService.IssuerWallet(context.Background(), identity); err == nil {
++				amIAnAuditor = true
++
++				break
++			}
++		}
++	}
+ 	logger.Debugf("am I an auditor? [%v], with errs [%v]", amIAnAuditor, errs)
+ 
+ 	return &WalletBasedAuthorization{Logger: logger, PublicParameters: publicParameters, WalletService: walletService, amIAnAuditor: amIAnAuditor}
+diff --git a/token/core/common/authorization_test.go b/token/core/common/authorization_test.go
+index c5fdced..654657d 100644
+--- a/token/core/common/authorization_test.go
++++ b/token/core/common/authorization_test.go
+@@ -41,6 +41,22 @@ func TestWalletBasedAuthorization(t *testing.T) {
+ 		assert.False(t, auth.AmIAnAuditor())
+ 	})
+ 
++	t.Run("NewTMSAuthorization_NoAuditors_IssuerKeepsAuditTokens", func(t *testing.T) {
++		pp := &mock.PublicParameters{}
++		pp.IssuersReturns([]driver.Identity{driver.Identity("issuer-id")})
++		ws := &mock.WalletService{}
++		ws.IssuerWalletReturns(&mock.IssuerWallet{}, nil)
++		assert.True(t, NewTMSAuthorization(logger, pp, ws).AmIAnAuditor())
++
++		ws.IssuerWalletReturns(nil, errors.New("not issuer"))
++		assert.False(t, NewTMSAuthorization(logger, pp, ws).AmIAnAuditor())
++
++		pp.AuditorsReturns([]driver.Identity{driver.Identity("auditor-id")})
++		ws.IssuerWalletReturns(&mock.IssuerWallet{}, nil)
++		ws.AuditorWalletReturns(nil, errors.New("not auditor"))
++		assert.False(t, NewTMSAuthorization(logger, pp, ws).AmIAnAuditor(), "with auditors only an auditor wallet counts")
++	})
++
+ 	auth := &WalletBasedAuthorization{
+ 		Logger:           logger,
+ 		PublicParameters: pp,

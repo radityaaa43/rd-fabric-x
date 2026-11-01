@@ -1,0 +1,40 @@
+--- a/platform/fabricx/core/transaction/transaction.go
++++ b/platform/fabricx/core/transaction/transaction.go
+@@ -10,7 +10,6 @@
+ 	"bytes"
+ 	"context"
+ 	"crypto/sha256"
+-	"encoding/hex"
+ 	"encoding/json"
+ 	"encoding/pem"
+ 
+@@ -786,20 +785,19 @@
+ 	return pemToMSPIdentity(sID.GetMspid(), sID.GetIdBytes())
+ }
+ 
+-// pemToMSPIdentity decodes a PEM-encoded X.509 certificate and constructs an
+-// msppb.Identity that identifies the signer by a SHA-256 hash of the
+-// DER-encoded certificate bytes (hex-encoded). The returned Identity uses the
+-// cached-identity (certificate-ID) format expected by Fabric-X committers and
+-// contains no raw certificate bytes, keeping the SignatureHeader compact.
++// pemToMSPIdentity decodes a PEM-encoded X.509 certificate and constructs an msppb.Identity that
++// carries the FULL certificate (the "Certificate Format" of the committer's namespace-policy wire
++// format) instead of the SHA-256 certificate ID.
+ //
+-// id is the MSP identifier string (e.g. "Org1MSP").
+-// raw must be a PEM block whose Bytes field contains the DER-encoded cert.
++// Upstream always sends the cached "certificate_id", which only verifies when the signer's
++// certificate is listed in the channel config (FabricMSPConfig.known_certs). On an existing network
++// whose channel config does not list our signers, the verifier rejects every endorsement with
++// "identity is unknown" (ABORTED_SIGNATURE_INVALID). Both formats are accepted by the committer
++// (fabric-x-common msp/mspmgrimpl.go), so sending the certificate needs no channel config change.
+ func pemToMSPIdentity(id string, raw []byte) (*msppb.Identity, error) {
+ 	block, _ := pem.Decode(raw)
+ 	if block == nil {
+ 		return nil, errors.New("failed to decode PEM certificate")
+ 	}
+-	digest := sha256.Sum256(block.Bytes)
+-	certID := hex.EncodeToString(digest[:])
+-	return msppb.NewIdentityWithIDOfCert(id, certID), nil
++	return msppb.NewIdentity(id, raw), nil
+ }

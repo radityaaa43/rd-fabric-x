@@ -1,0 +1,31 @@
+# The database is the bank's own Postgres on the compose network, without TLS (not published to the host);
+# the password comes from compose.yaml environment (SC_VC_DATABASE_PASSWORD).
+server:
+  endpoint: :5100
+  tls: &tls
+    mode: mtls
+    cert-path: /config/tls/server.crt
+    key-path: /config/tls/server.key
+    ca-cert-paths: [/config/tls/ca.crt]
+monitoring:
+  endpoint: :5200
+  tls: *tls
+startup-timeout: 5m
+database:
+  endpoints: [db:5432]
+  username: committer
+  password: set-by-environment
+  database: committer
+  tls: {mode: none}
+  max-connections: 10
+  min-connections: 5
+  load-balance: false
+  retry: {initial-interval: 500ms, randomization-factor: 0.5, multiplier: 1.5, max-interval: 60s, max-elapsed-time: 15m}
+resource-limits:
+  max-workers-for-preparer: 1
+  max-workers-for-validator: 1
+  max-workers-for-committer: 20
+  min-transaction-batch-size: 1
+  timeout-for-min-transaction-batch-size: 2s
+logging:
+  logSpec: info:grpc=error

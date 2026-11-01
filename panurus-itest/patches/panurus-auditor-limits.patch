@@ -1,0 +1,82 @@
+diff --git a/integration/token/fungible/views/accept.go b/integration/token/fungible/views/accept.go
+index 1b4da65..027cb28 100644
+--- a/integration/token/fungible/views/accept.go
++++ b/integration/token/fungible/views/accept.go
+@@ -7,8 +7,6 @@ SPDX-License-Identifier: Apache-2.0
+ package views
+ 
+ import (
+-	"math/big"
+-
+ 	"github.com/LFDT-Panurus/panurus/token"
+ 	"github.com/LFDT-Panurus/panurus/token/services/ttx"
+ 	"github.com/hyperledger-labs/fabric-smart-client/platform/common/utils/assert"
+@@ -46,7 +44,7 @@ func (a *AcceptCashView) Call(context view.Context) (any, error) {
+ 		}
+ 		balance, err := ttx.MyWallet(context, token.WithTMSID(tx.TMSID())).Balance(context.Context(), ttx.WithType(output.Type))
+ 		assert.NoError(err, "failed retrieving balance for type [%s]", output.Type)
+-		assert.True(balance.Cmp(big.NewInt(3000)) <= 0, "cannot have more than 3000 unspent quantity for type [%s]", output.Type)
++		assert.True(balance.Cmp(holdingLimit()) <= 0, "cannot have more than the holding limit of unspent quantity for type [%s]", output.Type)
+ 	}
+ 
+ 	// If everything is fine, the recipient accepts and sends back her signature.
+diff --git a/integration/token/fungible/views/auditor.go b/integration/token/fungible/views/auditor.go
+index 3c2d19e..824f952 100644
+--- a/integration/token/fungible/views/auditor.go
++++ b/integration/token/fungible/views/auditor.go
+@@ -10,6 +10,7 @@ import (
+ 	"encoding/json"
+ 	"fmt"
+ 	"math/big"
++	"os"
+ 
+ 	"github.com/LFDT-Panurus/panurus/token"
+ 	"github.com/LFDT-Panurus/panurus/token/services/ttx"
+@@ -84,7 +85,7 @@ func (a *AuditView) Call(context view.Context) (any, error) {
+ 			}
+ 			fmt.Printf("Payment Limit: [%s] Diff [%d], type [%s]\n", eID, diff.Int64(), tokenType)
+ 
+-			assert.True(diff.Cmp(big.NewInt(200)) <= 0, "payment limit reached [%s][%s][%s]", eID, tokenType, diff.Text(10))
++			assert.True(diff.Cmp(paymentLimit()) <= 0, "payment limit reached [%s][%s][%s]", eID, tokenType, diff.Text(10))
+ 			// R3: The default configuration is customized by a specific organisation (Guarantor)
+ 		}
+ 	}
+@@ -115,7 +116,7 @@ func (a *AuditView) Call(context view.Context) (any, error) {
+ 
+ 			// R3: The default configuration is customized by a specific organisation (Guarantor)
+ 			total := sumLastPayments.Add(sumLastPayments, diff)
+-			assert.True(total.Cmp(big.NewInt(2000)) < 0, "cumulative payment limit reached [%s][%s][%s]", eID, tokenType, total.Text(10))
++			assert.True(total.Cmp(cumulativeLimit()) < 0, "cumulative payment limit reached [%s][%s][%s]", eID, tokenType, total.Text(10))
+ 		}
+ 	}
+ 
+@@ -148,7 +149,7 @@ func (a *AuditView) Call(context view.Context) (any, error) {
+ 			fmt.Printf("Holding Limit: [%s] Current [%s], type [%s]\n", eID, currentHolding.Text(10), tokenType)
+ 
+ 			total := currentHolding.Add(currentHolding, diff)
+-			assert.True(total.Cmp(big.NewInt(3000)) < 0, "holding limit reached [%s][%s][%s]", eID, tokenType, total.Text(10))
++			assert.True(total.Cmp(holdingLimit()) < 0, "holding limit reached [%s][%s][%s]", eID, tokenType, total.Text(10))
+ 		}
+ 	}
+ 
+@@ -363,3 +364,20 @@ func (p *SetTransactionAuditStatusViewFactory) NewView(in []byte) (view.View, er
+ 
+ 	return f, nil
+ }
++
++// The three limits above are demonstration rules of the Panurus test auditor (200 per payment, 2000
++// cumulative over the last 10 payments, 3000 held). They are not BI's policy, so they can be set with
++// RDBI_PAYMENT_LIMIT, RDBI_CUMULATIVE_LIMIT and RDBI_HOLDING_LIMIT (decimal, per enrollment id and token
++// type); unset keeps the upstream value.
++func envLimit(name string, def int64) *big.Int {
++	if v := os.Getenv(name); v != "" {
++		if n, ok := new(big.Int).SetString(v, 10); ok {
++			return n
++		}
++	}
++	return big.NewInt(def)
++}
++
++func paymentLimit() *big.Int    { return envLimit("RDBI_PAYMENT_LIMIT", 200) }
++func cumulativeLimit() *big.Int { return envLimit("RDBI_CUMULATIVE_LIMIT", 2000) }
++func holdingLimit() *big.Int    { return envLimit("RDBI_HOLDING_LIMIT", 3000) }

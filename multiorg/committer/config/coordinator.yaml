@@ -1,0 +1,23 @@
+server:
+  endpoint: :5120
+  tls: &tls
+    mode: mtls
+    cert-path: /config/tls/server.crt
+    key-path: /config/tls/server.key
+    ca-cert-paths: [/config/tls/ca.crt]
+monitoring:
+  endpoint: :5220
+  tls: *tls
+startup-timeout: 5m
+verifier:
+  endpoints: [verifier:5110]
+  tls: *tls
+validator-committer:
+  endpoints: [vc:5100]
+  tls: *tls
+dependency-graph:
+  num-of-local-dep-constructors: 1
+  waiting-txs-limit: 100000
+per-channel-buffer-size-per-goroutine: 10
+logging:
+  logSpec: info:grpc=error
