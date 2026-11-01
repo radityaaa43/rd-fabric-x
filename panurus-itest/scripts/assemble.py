@@ -5,10 +5,10 @@ Everything the token layer needs (FSC identities, Idemix credentials, issuer/aud
 parameters) is taken unchanged from the generated tree. Only the ledger side is replaced:
   - fabric.default points at the sidecar / query service NodePorts of the existing network,
     channel arma, mTLS with the node's own identity from its organisation's CA (see enroll_ids.py);
-  - token.tms uses namespace rd_dfabi on channel arma;
+  - token.tms uses the token namespace (NAMESPACE) on channel arma;
   - the fabric identity resolvers map every node name to that identity and MSP.
 Env: RDBI_HOME (default ~/.fabricx-token), CLUSTER_HOST (default 172.24.11.197),
-SIDECAR_PORT/QUERY_PORT (30560/30580), ROUTER_PORTS (30050,30150,30250,30350), NAMESPACE (rd_dfabi).
+SIDECAR_PORT/QUERY_PORT (30560/30580), ROUTER_PORTS (30050,30150,30250,30350), NAMESPACE (rd_dfabi_v2), PUBLIC_PARAMS (default: the generated 16-bit parameters).
 """
 import json, os, re, shutil, subprocess, sys, glob
 import yaml
@@ -22,7 +22,7 @@ QUERY = f"{HOST}:{os.environ.get('QUERY_PORT', '30580')}"
 ROUTER_PORTS = os.environ.get("ROUTER_PORTS", "30050,30150,30250,30350").split(",")
 ASSEMBLER_PORTS = os.environ.get("ASSEMBLER_PORTS", "30052,30152,30252,30352").split(",")  # ../multiorg/committer
 DOCKER_GW = os.environ.get("DOCKER_GW", "172.17.0.1")
-NS = os.environ.get("NAMESPACE", "rd_dfabi")
+NS = os.environ.get("NAMESPACE", "rd_dfabi_v2")
 CHANNEL = "arma"
 NODES = {"issuer": "issuer", "bank2": "bank", "bank3": "bank", "bank4": "bank",
          "endorser-1": "endorser", "endorser-2": "endorser", "endorser-3": "endorser", "endorser-4": "endorser"}
@@ -109,7 +109,7 @@ for node, role in NODES.items():
         if n in NODES:
             r["identity"] = {"mspID": msp_of(n), "path": os.path.join(H, "ids", n, "msp")}
 
-    # --- token side: namespace rd_dfabi on channel arma
+    # --- token side: the token namespace on channel arma
     tms = cfg["token"]["tms"]
     (old_key, t), = tms.items()
     t["channel"], t["namespace"], t["network"] = CHANNEL, NS, "default"
@@ -133,8 +133,9 @@ forwards += [{"listen": f"{DOCKER_GW}:{7052 + 100 * (i - 1)}", "target": f"{HOST
 json.dump({"hosts": hosts}, open(os.path.join(LIVE, "netshim-dns.json"), "w"), indent=1)
 json.dump({"forwards": forwards}, open(os.path.join(LIVE, "netshim-forward.json"), "w"), indent=1)
 
-# --- public parameters, as produced by tokengen inside the generated tree
-pp = glob.glob(os.path.join(GEN, "token", "crypto", "pp", "*"))
+# --- public parameters, as produced by tokengen inside the generated tree (16-bit), or PUBLIC_PARAMS
+# (rd_dfabi_v2 uses 64-bit parameters made from them by cmd/ppgen: $RDBI_HOME/multiorg/public-params-64bit.bin)
+pp = [os.environ["PUBLIC_PARAMS"]] if os.environ.get("PUBLIC_PARAMS") else glob.glob(os.path.join(GEN, "token", "crypto", "pp", "*"))
 assert len(pp) == 1, pp
 shutil.copy(pp[0], os.path.join(LIVE, "public-params.bin"))
 print("assembled", sorted(NODES), "namespace", NS, "channel", CHANNEL, "pp", os.path.getsize(pp[0]), "bytes")

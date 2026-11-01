@@ -4,12 +4,12 @@
 Every token transaction on the ledger leaves a token request key \\0tr\\0<txid>\\0 in the token namespace. Each
 of them must have a confirmed record in BI's audit store (issuer node). Reads BI's committer DB in the cluster
 (password stays inside the pod) and the issuer's SQLite store, read-only. Prints the gaps; exit 1 if any.
-Env: KUBECONFIG, RDBI_HOME (default ~/.fabricx-token), NAMESPACE (default rd_dfabi).
+Env: KUBECONFIG, RDBI_HOME (default ~/.fabricx-token), NAMESPACE (default rd_dfabi_v2).
 """
 import os, sqlite3, subprocess, sys
 
 H = os.environ.get("RDBI_HOME", os.path.expanduser("~/.fabricx-token"))
-NS = os.environ.get("NAMESPACE", "rd_dfabi")
+NS = os.environ.get("NAMESPACE", "rd_dfabi_v2")
 
 sql = f"select encode(key, 'escape') from ns_{NS}"
 out = subprocess.check_output(["kubectl", "-n", "fabricx", "exec", "committer-db-0", "--", "sh", "-c",

@@ -16,7 +16,14 @@ Everything runs in the cluster, k8s namespace `fabricx` (since 2026-11-02, `scri
 | Bank B | 3 | `OrdererOrg3MSP` | `fca-orderer-org3` | in pod `rdbi-bank3` | `bank3`, `endorser-3` (`rdbi-bank3`) |
 | Bank C | 4 | `OrdererOrg4MSP` | `fca-orderer-org4` | in pod `rdbi-bank4` | `bank4`, `endorser-4` (`rdbi-bank4`) |
 
-- Token namespace `rd_dfabi`: endorsement policy `OutOf(3, Org1MSP, OrdererOrg2MSP, OrdererOrg3MSP, OrdererOrg4MSP)`.
+- Token namespace `rd_dfabi_v2`: endorsement policy `OutOf(3, Org1MSP, OrdererOrg2MSP, OrdererOrg3MSP, OrdererOrg4MSP)`.
+- Public parameters with **64-bit** amounts (max 18446744073709551615 per token): `rdbi/cmd/ppgen` re-creates the
+  generated 16-bit parameters (max 65535) with the same Idemix issuer key and issuer, written to
+  `$RDBI_HOME/multiorg/public-params-64bit.bin` and used via `PUBLIC_PARAMS=... make live-assemble`. A namespace keeps
+  its parameters' token format, so 2026-11-02 switched to the new namespace `rd_dfabi_v2` (created like `rd_dfabi`,
+  4-org endorsed); the tokens of `rd_dfabi` (16-bit) stay on the ledger but are no longer used.
+- `rdbi-driver api ...` is a JSON interface (issue, transfer, swap, balance, per-node records) used by the Lensa
+  Privasi frontend (`../../frontend`, model Fabric-X).
 - Channel `LifecycleEndorsement` (who may create or change a namespace): all four organisations.
 - Public parameters list **no auditor**. With an auditor Panurus requires its signature on every token request
   (`token/core/common/validator_auditing.go`), which stops every transfer while BI is offline. BI learns about
@@ -35,7 +42,7 @@ report fails and the transaction stays final.
   recorded (BI needs the openings of a transaction's inputs from an earlier report, so reports must arrive in causal
   order). A receiver's copy lacks the other parties' openings and is refused; the initiator's copy is accepted.
 - `scripts/reconcile.py` (`make live-reconcile`): every token transaction on the ledger (token request key in
-  `ns_rd_dfabi` of BI's committer) must have a confirmed record at BI; lists the gaps, exit 1 if any.
+  `ns_rd_dfabi_v2` of BI's committer) must have a confirmed record at BI; lists the gaps, exit 1 if any.
 - `rdbi-driver audited`: BI's records, one line per movement (sender, recipient, amount, type, ledger status).
 
 This is a detective control: a bank can delay or withhold a report, and BI finds it with the reconciliation.

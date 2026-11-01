@@ -2,7 +2,7 @@
 // It calls the same views as the integration test (issue, transfer, swap, redeem, balance, audit)
 // over each node's gRPC view API.
 //
-//	driver setup-pp        install the public parameters into namespace rd_dfabi (once per namespace)
+//	driver setup-pp        install the public parameters into the token namespace (NAMESPACE, default rd_dfabi_v2; once)
 //	driver scenario        issue, transfer, DvP swap and burn, then check balances
 //	driver negative        attempts that must be rejected without changing any balance
 //	driver transfer <from> <to> <type> <amount>
@@ -10,6 +10,7 @@
 //	driver balance <node> <type>
 //	driver report          every node reports what it holds to BI (catch-up after BI was offline); lists gaps
 //	driver audited         BI's audit records
+//	driver api ...         one operation as JSON, for the Lensa Privasi frontend (api.go)
 package main
 
 import (
@@ -340,7 +341,7 @@ func main() {
 	case "setup-pp":
 		pp, err := os.ReadFile(filepath.Join(live, "public-params.bin"))
 		must(err, "read public params")
-		call(bi, "SetupPublicParams", &ppsetup.SetupPublicParams{Network: "default", Channel: "arma", Namespace: envOr("NAMESPACE", "rd_dfabi"), PublicParamsRaw: pp, Timeout: 2 * time.Minute})
+		call(bi, "SetupPublicParams", &ppsetup.SetupPublicParams{Network: "default", Channel: "arma", Namespace: envOr("NAMESPACE", "rd_dfabi_v2"), PublicParamsRaw: pp, Timeout: 2 * time.Minute})
 		fmt.Println("public parameters installed")
 	case "scenario":
 		scenario()
@@ -365,6 +366,8 @@ func main() {
 		reportAll()
 	case "audited":
 		audited()
+	case "api": // JSON interface for the Lensa Privasi adapter, see api.go
+		api(os.Args[2:])
 	}
 }
 
