@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -505,12 +506,12 @@ func waitBalance(n, typ string, want uint64) bool {
 }
 
 func negative() {
-	// Token values are limited by the public parameters' precision (16 bit: 65535). To test "more than I own"
-	// without hitting that separate limit, ask for exactly one more than the balance.
+	// Token values are limited by the public parameters' precision (64 bit in rd_dfabi_v2). To test "more than I
+	// own" without hitting that separate limit, ask for exactly one more than the balance.
 	over := func(n, typ string) uint64 {
 		b := balance(n, typ)
-		if b+1 > 65535 {
-			must(fmt.Errorf("%s holds %d %s, one more exceeds the 16-bit token precision", n, b, typ), "negative test setup")
+		if b == math.MaxUint64 {
+			must(fmt.Errorf("%s holds %d %s, one more exceeds the 64-bit token precision", n, b, typ), "negative test setup")
 		}
 		return b + 1
 	}
