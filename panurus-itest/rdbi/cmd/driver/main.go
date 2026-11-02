@@ -526,9 +526,11 @@ func negative() {
 		return err
 	})
 
-	// funds and atomicity
-	reject("sender without funds", []string{"insufficient funds"}, func() error {
-		_, err := tryCall("bank4", "transfer", &views.Transfer{Auditor: auditor, Type: rd, Amount: 10, Recipient: []byte("bank2"), RecipientEID: "bank2"})
+	// funds and atomicity. bank4 is Bank C in the frontend and may hold tokens, so its attempts ask for more than
+	// it holds and the check at the end compares with this snapshot instead of zero.
+	b4 := snapshot()
+	reject("sender without enough funds", []string{"insufficient funds"}, func() error {
+		_, err := tryCall("bank4", "transfer", &views.Transfer{Auditor: auditor, Type: rd, Amount: over("bank4", rd), Recipient: []byte("bank2"), RecipientEID: "bank2"})
 		return err
 	})
 	reject("transfer above balance", []string{"insufficient funds"}, func() error {
@@ -540,7 +542,7 @@ func negative() {
 		return err
 	})
 	reject("DvP, proposer lacks the asset (atomic)", []string{"insufficient funds"}, func() error {
-		_, err := tryCall("bank4", "swap", &views.Swap{Auditor: auditor, FromAliceType: rd, FromAliceAmount: 10, FromBobType: dfabi, FromBobAmount: 1, Bob: []byte("bank3")})
+		_, err := tryCall("bank4", "swap", &views.Swap{Auditor: auditor, FromAliceType: rd, FromAliceAmount: over("bank4", rd), FromBobType: dfabi, FromBobAmount: 1, Bob: []byte("bank3")})
 		return err
 	})
 
@@ -576,9 +578,10 @@ func negative() {
 	good := ok <= 1 && waitBalance("bank2", rd, before["bank2/"+rd]-amt*uint64(ok)) && waitBalance("bank3", rd, before["bank3/"+rd]+amt*uint64(ok))
 	report("double spend: never more than one of two conflicting transfers", good, fmt.Sprintf("accepted=%d, balances consistent with that", ok))
 
-	// bank4 never took part in anything
+	// bank4's attempts all failed, so nothing moved
 	b4rd, b4dfabi := balance("bank4", rd), balance("bank4", dfabi)
-	report("bank4 holds nothing after all attempts", b4rd == 0 && b4dfabi == 0, fmt.Sprintf("RD=%d DFABI=%d", b4rd, b4dfabi))
+	report("bank4 balances unchanged after all attempts", b4rd == b4["bank4/"+rd] && b4dfabi == b4["bank4/"+dfabi],
+		fmt.Sprintf("RD %d->%d DFABI %d->%d", b4["bank4/"+rd], b4rd, b4["bank4/"+dfabi], b4dfabi))
 
 	if fails > 0 {
 		fmt.Printf("NEGATIVE FAILED: %d check(s)\n", fails)
