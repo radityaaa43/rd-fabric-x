@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 //	api swap <from> <to> <type from gives> <amount> <type to gives> <amount>    DvP
 //	api balance <node> <type>
 //	api records <node> <txid>    what the node itself holds about the transaction (BI: its audit records)
+//	api history <node> <limit>   the movements of the node's <limit> newest transactions from its own store, newest first
 func api(args []string) {
 	var out any
 	switch args[0] {
@@ -42,6 +44,12 @@ func api(args []string) {
 		out = map[string]string{"amount": strconv.FormatUint(balance(args[1], args[2]), 10)}
 	case "records":
 		out = map[string]any{"records": records(args[1], args[2])}
+	case "history":
+		n, err := strconv.Atoi(args[2])
+		if err != nil || n < 1 {
+			must(os.ErrInvalid, "history limit "+args[2])
+		}
+		out = map[string]any{"records": history(args[1], n)}
 	default:
 		must(os.ErrInvalid, "api "+args[0])
 	}
@@ -126,6 +134,65 @@ func records(n, txid string) []record {
 			Action: []string{"issue", "transfer", "redeem"}[r.ActionType], Sender: r.SenderEID, Recipient: r.RecipientEID,
 			Type: r.TokenType, Amount: r.Amount.String(),
 			Status: []string{"unknown", "pending", "confirmed", "deleted", "orphan"}[r.Status],
+		})
+	}
+	return recs
+}
+
+type historyRecord struct {
+	TxID      string `json:"txId"`
+	Type      string `json:"type"`
+	Sender    string `json:"sender"`
+	Recipient string `json:"recipient"`
+	Token     string `json:"token"`
+	Amount    string `json:"amount"`
+	Timestamp string `json:"timestamp"` // RFC 3339: when the node stored the record, not the commit time
+	Status    string `json:"status"`
+}
+
+// history returns the movements of the node's newest `limit` transactions, newest first, from the node's own store
+// (a bank: the transactions it took part in; BI: its audit store, every transaction reported to it). Read-only: the
+// same views as records, without the txid filter.
+func history(n string, limit int) []historyRecord {
+	var raw []struct {
+		TxID         string
+		ActionType   int
+		SenderEID    string
+		RecipientEID string
+		TokenType    string
+		Amount       json.Number
+		Status       int
+		Timestamp    time.Time
+	}
+	var out any
+	if n == bi {
+		out = call(bi, "audited", struct{}{})
+	} else {
+		out = call(n, "acceptedTransactionHistory", &views.ListAcceptedTransactions{})
+	}
+	dec := json.NewDecoder(bytes.NewReader(out.([]byte)))
+	dec.UseNumber()
+	must(dec.Decode(&raw), "decode history")
+	sort.SliceStable(raw, func(i, j int) bool { return raw[i].Timestamp.After(raw[j].Timestamp) })
+	// Index = enum value: ActionType Issue, Transfer, Redeem (panurus v0.24.0 token/services/storage/db/driver/common.go:22-31);
+	// TxStatus Unknown, Pending, Confirmed, Deleted, Orphan (token/driver/vault.go:32-45).
+	actions := []string{"issue", "transfer", "redeem"}
+	statuses := []string{"unknown", "pending", "confirmed", "deleted", "orphan"}
+	recs := []historyRecord{}
+	seen := map[string]bool{}
+	for _, r := range raw {
+		if !seen[r.TxID] {
+			if len(seen) == limit {
+				continue // the newest `limit` txs are chosen: skip the rows of older ones, but keep every row of a chosen one
+			}
+			seen[r.TxID] = true
+		}
+		if r.ActionType < 0 || r.ActionType >= len(actions) || r.Status < 0 || r.Status >= len(statuses) {
+			must(os.ErrInvalid, "history record "+r.TxID+": unknown action or status")
+		}
+		recs = append(recs, historyRecord{
+			TxID: r.TxID, Type: actions[r.ActionType], Sender: r.SenderEID, Recipient: r.RecipientEID, Token: r.TokenType,
+			Amount: r.Amount.String(), Timestamp: r.Timestamp.UTC().Format(time.RFC3339Nano), Status: statuses[r.Status],
 		})
 	}
 	return recs
