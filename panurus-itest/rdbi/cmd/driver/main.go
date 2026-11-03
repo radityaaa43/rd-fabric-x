@@ -26,9 +26,9 @@ import (
 	"time"
 
 	views1 "github.com/LFDT-Panurus/panurus/integration/token/common/views"
-	"github.com/LFDT-Panurus/panurus/integration/token/fungible/views"
 	"github.com/LFDT-Panurus/panurus/integration/token/fungible/rdbi/award"
 	rep "github.com/LFDT-Panurus/panurus/integration/token/fungible/rdbi/report"
+	"github.com/LFDT-Panurus/panurus/integration/token/fungible/views"
 	"github.com/LFDT-Panurus/panurus/integration/token/fungible/views/ppsetup"
 	"github.com/LFDT-Panurus/panurus/token/services/identity"
 	"github.com/LFDT-Panurus/panurus/token/services/identity/x509"
@@ -371,10 +371,7 @@ func main() {
 		fmt.Sscan(os.Args[7], &get)
 		swap(os.Args[2], os.Args[4], give, os.Args[3], os.Args[6], get)
 	case "award": // award <to-node> <dfabi-amount> <rd-amount>
-		var dfabiAmount, rdAmount uint64
-		fmt.Sscan(os.Args[3], &dfabiAmount)
-		fmt.Sscan(os.Args[4], &rdAmount)
-		awardTx(os.Args[2], dfabiAmount, rdAmount)
+		awardTx(os.Args[2], amount(os.Args[3]), amount(os.Args[4]))
 	case "balance":
 		fmt.Println(balance(os.Args[2], strings.TrimSpace(os.Args[3])))
 	case "report": // report [<node> <txid>]

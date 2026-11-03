@@ -6,8 +6,9 @@ package award
 
 import (
 	"encoding/json"
-	"math/big"
+	"strings"
 
+	ptoken "github.com/LFDT-Panurus/panurus/token"
 	"github.com/LFDT-Panurus/panurus/token/services/ttx"
 	"github.com/LFDT-Panurus/panurus/token/token"
 	"github.com/hyperledger-labs/fabric-smart-client/pkg/utils/errors"
@@ -18,11 +19,14 @@ import (
 	"github.com/hyperledger-labs/fabric-smart-client/platform/view/view"
 )
 
+// biNode is the FSC node of BI (the topology requires the name "issuer").
+const biNode = "issuer"
+
 // Award is the input of the "award" view, run on BI.
 type Award struct {
 	// Auditor is the name of the auditor identity (empty: BI's default identity, as the issue view does)
 	Auditor string
-	// Bank is the identity of the buying bank's FSC node
+	// Bank is the identity of the buying bank's FSC node (the node name; the bank's enrolment id must start with it)
 	Bank view.Identity
 	// IssueType and IssueAmount: what BI issues to the bank
 	IssueType   token.Type
@@ -32,14 +36,38 @@ type Award struct {
 	PayAmount uint64
 }
 
+// validate rejects an award that cannot be a sale of one type for another.
+func (a *Award) validate() error {
+	if len(a.Bank) == 0 {
+		return errors.New("bank is empty")
+	}
+	if a.IssueType == "" || a.PayType == "" || a.IssueType == a.PayType {
+		return errors.New("issue type and pay type must be two different types")
+	}
+	if err := checkAmount("DFABI", a.IssueAmount); err != nil {
+		return err
+	}
+
+	return checkAmount("RD", a.PayAmount)
+}
+
 type InitiatorView struct {
 	*Award
 }
 
 func (t *InitiatorView) Call(context view.Context) (any, error) {
+	assert.NoError(t.Award.validate(), "invalid award")
+
 	// BI and the bank exchange the recipient identities that will own the DFABI (bank) and the RD (BI).
 	me, bank, err := ttx.ExchangeRecipientIdentities(context, "", t.Bank)
 	assert.NoError(err, "failed exchanging identities")
+
+	// The bank identity must belong to the bank asked for, as the issue view checks.
+	tms, err := ptoken.GetManagementService(context)
+	assert.NoError(err, "failed getting token service")
+	bankEID, err := tms.WalletManager().GetEnrollmentID(context.Context(), bank)
+	assert.NoError(err, "failed getting the bank's enrollment id")
+	assert.True(strings.HasPrefix(bankEID, string(t.Bank)), "bank enrollment id [%s] does not match the expected one [%s]", bankEID, t.Bank)
 
 	// Same auditor choice as the issue view.
 	idProvider, err := id.GetProvider(context)
@@ -63,14 +91,12 @@ func (t *InitiatorView) Call(context view.Context) (any, error) {
 	))
 	assert.NoError(err, "failed collecting actions")
 
-	// BI checks the request holds exactly the two legs it agreed on.
+	// BI checks the request holds exactly the two legs it agreed on, and nothing else.
 	assert.NoError(tx.IsValid(context.Context()), "failed verifying transaction")
-	outputs, err := tx.Outputs(context.Context())
-	assert.NoError(err, "failed getting outputs")
-	got := outputs.ByRecipient(bank).ByType(t.IssueType)
-	assert.Equal(0, got.Sum().Cmp(new(big.Int).SetUint64(t.IssueAmount)), "DFABI output for the bank is not the amount awarded")
-	got = outputs.ByRecipient(me).ByType(t.PayType)
-	assert.Equal(0, got.Sum().Cmp(new(big.Int).SetUint64(t.PayAmount)), "RD output for BI is not the price")
+	assert.NoError(checkTx(context, tx, terms{
+		Bank: bank, BI: me, BankEID: bankEID,
+		IssueType: t.IssueType, IssueAmount: t.IssueAmount, PayType: t.PayType, PayAmount: t.PayAmount,
+	}), "the bank's answer is not the agreed award")
 
 	_, err = context.RunView(ttx.NewCollectEndorsementsView(tx))
 	assert.NoError(err, "failed to sign transaction")
@@ -92,20 +118,32 @@ func (p *InitiatorViewFactory) NewView(in []byte) (view.View, error) {
 }
 
 // ResponderView runs on the bank: it takes part in the exchange and adds the RD transfer BI asks for.
-// It mirrors Panurus's SwapResponderView.
+// It mirrors Panurus's SwapResponderView, but checks what it signs: the caller is BI, the transaction holds one
+// issue of DFABI to this bank and one RD transfer to BI of the amount asked, and nothing else.
 type ResponderView struct{}
 
 func (t *ResponderView) Call(context view.Context) (any, error) {
-	_, _, err := ttx.RespondExchangeRecipientIdentities(context)
+	idp, err := id.GetProvider(context)
+	assert.NoError(err, "failed getting id provider")
+	assert.NoError(checkCaller(context.Session().Info().Caller, idp.Identity(biNode)), "award refused")
+
+	mine, bi, err := ttx.RespondExchangeRecipientIdentities(context)
 	assert.NoError(err, "failed getting identity")
 
 	tx, action, err := ttx.ReceiveAction(context)
 	assert.NoError(err, "failed receiving action")
+	assert.NoError(checkAsk(action.Type, action.Amount, action.Recipient, bi), "award refused")
 
 	wallet := ttx.MyWalletFromTx(context, tx)
 	assert.NotNil(wallet, "default wallet not found")
 	err = tx.Transfer(context.Context(), wallet, action.Type, []uint64{action.Amount}, []view.Identity{action.Recipient})
 	assert.NoError(err, "failed appending transfer")
+
+	// Check the whole request before it goes back to BI: the bank signs exactly this request.
+	if err := t.checkOwnTx(context, tx, mine, bi, action); err != nil {
+		tx.Release()
+		assert.NoError(err, "award refused")
+	}
 
 	_, err = context.RunView(ttx.NewCollectActionsResponderView(tx, action))
 	assert.NoError(err, "failed responding to action collect")
@@ -117,6 +155,27 @@ func (t *ResponderView) Call(context view.Context) (any, error) {
 	assert.NoError(err, "new tokens were not committed")
 
 	return tx.ID(), nil
+}
+
+func (t *ResponderView) checkOwnTx(context view.Context, tx *ttx.Transaction, mine, bi view.Identity, action *ttx.ActionTransfer) error {
+	tms, err := ptoken.GetManagementService(context)
+	if err != nil {
+		return errors.WithMessage(err, "token service unavailable")
+	}
+	eid, err := tms.WalletManager().GetEnrollmentID(context.Context(), mine)
+	if err != nil {
+		return errors.WithMessage(err, "own enrollment id unavailable")
+	}
+	r, err := readTx(context, tx)
+	if err != nil {
+		return err
+	}
+	w, err := agreedFromIssue(r.Outputs, mine, bi, eid, action.Type, action.Amount)
+	if err != nil {
+		return err
+	}
+
+	return w.check(r)
 }
 
 // SDK adds the "award" view to BI's node (issuer=true) or the responder to a bank's node.
