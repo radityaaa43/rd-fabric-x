@@ -21,6 +21,7 @@ import (
 //	api issue <to> <type> <amount>                                  BI issues to a bank
 //	api transfer <from> <to> <type> <amount>
 //	api swap <from> <to> <type from gives> <amount> <type to gives> <amount>    DvP
+//	api award <to> <dfabi amount> <rd amount>                       BI issues DFABI to a bank, the bank pays RD, one transaction
 //	api balance <node> <type>
 //	api records <node> <txid>    what the node itself holds about the transaction (BI: its audit records)
 //	api history <node> <limit>   the movements of the node's <limit> newest transactions from its own store, newest first
@@ -39,6 +40,10 @@ func api(args []string) {
 		out = run(args[1], []string{args[2]}, func() any {
 			return call(args[1], "swap", &views.Swap{Auditor: auditor, FromAliceType: token.Type(args[3]), FromAliceAmount: amount(args[4]),
 				FromBobType: token.Type(args[5]), FromBobAmount: amount(args[6]), Bob: []byte(args[2])})
+		})
+	case "award":
+		out = run(bi, []string{args[1]}, func() any {
+			return call(bi, "award", awardInput(args[1], amount(args[2]), amount(args[3])))
 		})
 	case "balance":
 		out = map[string]string{"amount": strconv.FormatUint(balance(args[1], args[2]), 10)}

@@ -7,6 +7,7 @@
 //	driver negative        attempts that must be rejected without changing any balance
 //	driver transfer <from> <to> <type> <amount>
 //	driver swap <from> <to> <type from gives> <amount> <type to gives> <amount>   (DvP)
+//	driver award <to-node> <dfabi-amount> <rd-amount>   BI issues DFABI to a bank, the bank pays RD, one transaction
 //	driver balance <node> <type>
 //	driver report          every node reports what it holds to BI (catch-up after BI was offline); lists gaps
 //	driver audited         BI's audit records
@@ -26,6 +27,7 @@ import (
 
 	views1 "github.com/LFDT-Panurus/panurus/integration/token/common/views"
 	"github.com/LFDT-Panurus/panurus/integration/token/fungible/views"
+	"github.com/LFDT-Panurus/panurus/integration/token/fungible/rdbi/award"
 	rep "github.com/LFDT-Panurus/panurus/integration/token/fungible/rdbi/report"
 	"github.com/LFDT-Panurus/panurus/integration/token/fungible/views/ppsetup"
 	"github.com/LFDT-Panurus/panurus/token/services/identity"
@@ -129,6 +131,17 @@ func swap(from string, giveTyp string, give uint64, to string, getTyp string, ge
 	finality(tx, from, to)
 	fmt.Printf("DvP swap %s gives %d %s, %s gives %d %s  tx %s\n", from, give, giveTyp, to, get, getTyp, tx[:12])
 	reportTx(from, tx)
+}
+
+func awardTx(to string, dfabiAmount, rdAmount uint64) {
+	tx := txID(call(bi, "award", awardInput(to, dfabiAmount, rdAmount)))
+	finality(tx, bi, to)
+	fmt.Printf("award    %5d %-12s -> %-5s for %d %s tx %s\n", dfabiAmount, dfabi, to, rdAmount, rd, tx[:12])
+	reportTx(bi, tx)
+}
+
+func awardInput(to string, dfabiAmount, rdAmount uint64) *award.Award {
+	return &award.Award{Auditor: auditor, Bank: []byte(to), IssueType: dfabi, IssueAmount: dfabiAmount, PayType: rd, PayAmount: rdAmount}
 }
 
 // reportTx has the initiator report a final transaction to BI. With BI offline the report stays due and
@@ -335,7 +348,7 @@ func scenario() {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("usage: driver setup-pp|scenario|negative|transfer <from> <to> <type> <amount>|swap <from> <to> <type> <amount> <type> <amount>|balance <node> <type>|report|audited")
+		fmt.Println("usage: driver setup-pp|scenario|negative|transfer <from> <to> <type> <amount>|swap <from> <to> <type> <amount> <type> <amount>|award <to> <dfabi> <rd>|balance <node> <type>|report|audited")
 		os.Exit(2)
 	}
 	switch os.Args[1] {
@@ -357,6 +370,11 @@ func main() {
 		fmt.Sscan(os.Args[5], &give)
 		fmt.Sscan(os.Args[7], &get)
 		swap(os.Args[2], os.Args[4], give, os.Args[3], os.Args[6], get)
+	case "award": // award <to-node> <dfabi-amount> <rd-amount>
+		var dfabiAmount, rdAmount uint64
+		fmt.Sscan(os.Args[3], &dfabiAmount)
+		fmt.Sscan(os.Args[4], &rdAmount)
+		awardTx(os.Args[2], dfabiAmount, rdAmount)
 	case "balance":
 		fmt.Println(balance(os.Args[2], strings.TrimSpace(os.Args[3])))
 	case "report": // report [<node> <txid>]

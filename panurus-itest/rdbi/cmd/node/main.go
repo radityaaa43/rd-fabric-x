@@ -14,6 +14,7 @@ import (
 	endorser "github.com/LFDT-Panurus/panurus/integration/token/fungible/sdk/endorser"
 	issuer "github.com/LFDT-Panurus/panurus/integration/token/fungible/sdk/issuer"
 	party "github.com/LFDT-Panurus/panurus/integration/token/fungible/sdk/party"
+	"github.com/LFDT-Panurus/panurus/integration/token/fungible/rdbi/award"
 	"github.com/LFDT-Panurus/panurus/integration/token/fungible/rdbi/report"
 	fscnode "github.com/hyperledger-labs/fabric-smart-client/node"
 )
@@ -31,9 +32,9 @@ func main() {
 	base := fxdlog.NewSDK(n)
 	switch role := os.Getenv("RDBI_ROLE"); role {
 	case "issuer": // BI: issuer of RD and DFABI, DFABI custodian, receives the banks' reports
-		n.InstallSDK(report.NewFrom(issuer.NewFrom(base), true))
+		n.InstallSDK(report.NewFrom(award.NewFrom(issuer.NewFrom(base), true), true))
 	case "bank":
-		n.InstallSDK(report.NewFrom(party.NewFrom(base), false))
+		n.InstallSDK(report.NewFrom(award.NewFrom(party.NewFrom(base), false), false))
 	case "endorser":
 		n.InstallSDK(endorser.NewFrom(base))
 	default:
