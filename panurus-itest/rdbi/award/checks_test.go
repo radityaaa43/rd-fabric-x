@@ -38,7 +38,7 @@ func out(kind request.ActionType, owner view.Identity, eid string, typ token.Typ
 
 func in(eid string) *ptoken.Input { return &ptoken.Input{ActionType: transK, EnrollmentID: eid} }
 
-var agreed = terms{Bank: bank, BI: bi, BankEID: "bank2", IssueType: "DFABI", IssueAmount: 50, PayType: "RD", PayAmount: 200}
+var agreed = terms{Bank: bank, BI: bi, BankEID: "bank2", IssueType: "DFABI", IssueAmount: 50, PayType: "RD", PayAmount: 50 * PricePerUnit}
 
 // good is the request the award produces: DFABI to the bank, RD to BI, RD change back to the bank.
 func good() parsed {
@@ -46,7 +46,7 @@ func good() parsed {
 		Issues: 1, Transfers: 1,
 		Outputs: []*ptoken.Output{
 			out(issueK, bank, "bank2", "DFABI", 50),
-			out(transK, bi, "issuer", "RD", 200),
+			out(transK, bi, "issuer", "RD", 50*PricePerUnit),
 			out(transK, change, "bank2", "RD", 300),
 		},
 		Inputs: []*ptoken.Input{in("bank2"), in("bank2")},
@@ -75,9 +75,9 @@ func TestCheck(t *testing.T) {
 		{"wrong DFABI amount", mutate(func(r *parsed) { r.Outputs[0] = out(issueK, bank, "bank2", "DFABI", 51) }), "DFABI for the bank"},
 		{"wrong DFABI type", mutate(func(r *parsed) { r.Outputs[0].Type = "DFABI-2028" }), "DFABI for the bank"},
 		{"DFABI to the wrong recipient", mutate(func(r *parsed) { r.Outputs[0].Owner = other }), "DFABI for the bank"},
-		{"wrong RD amount", mutate(func(r *parsed) { r.Outputs[1] = out(transK, bi, "issuer", "RD", 201) }), "agreed RD"},
+		{"wrong RD amount", mutate(func(r *parsed) { r.Outputs[1] = out(transK, bi, "issuer", "RD", 50*PricePerUnit+1) }), "agreed RD"},
 		{"RD to BI in another type", mutate(func(r *parsed) { r.Outputs[1].Type = "DFABI" }), "agreed RD"},
-		{"RD paid twice to BI", mutate(func(r *parsed) { r.Outputs = append(r.Outputs, out(transK, bi, "issuer", "RD", 200)) }), "agreed RD"},
+		{"RD paid twice to BI", mutate(func(r *parsed) { r.Outputs = append(r.Outputs, out(transK, bi, "issuer", "RD", 50*PricePerUnit)) }), "agreed RD"},
 		{"RD to the wrong recipient", mutate(func(r *parsed) { r.Outputs[1].Owner = other; r.Outputs[1].EnrollmentID = "x" }), "neither"},
 		{"RD output missing", mutate(func(r *parsed) { r.Outputs = []*ptoken.Output{r.Outputs[0], r.Outputs[2]} }), "lacks"},
 		{"DFABI output missing", mutate(func(r *parsed) { r.Outputs = r.Outputs[1:] }), "lacks"},
@@ -133,7 +133,7 @@ func TestCheckAsk(t *testing.T) {
 // The bank derives the DFABI leg from the request; a request that does not issue exactly once to it is refused.
 func TestAgreedFromIssue(t *testing.T) {
 	r := good()
-	w, err := agreedFromIssue(r.Outputs, bank, bi, "bank2", "RD", 200)
+	w, err := agreedFromIssue(r.Outputs, bank, bi, "bank2", "RD", 50*PricePerUnit)
 	if err != nil || !reflect.DeepEqual(w, agreed) {
 		t.Fatalf("got %+v, %v", w, err)
 	}
@@ -148,24 +148,35 @@ func TestAgreedFromIssue(t *testing.T) {
 		"issue of nothing": {out(issueK, bank, "bank2", "DFABI", 0)},
 		"issue too large":  {out(issueK, bank, "bank2", "DFABI", MaxAmount+1)},
 	} {
-		if _, err := agreedFromIssue(outs, bank, bi, "bank2", "RD", 200); err == nil {
+		if _, err := agreedFromIssue(outs, bank, bi, "bank2", "RD", 50*PricePerUnit); err == nil {
 			t.Errorf("%s accepted", name)
 		}
 	}
 }
 
+// The bank refuses an RD ask that is not exactly the issued DFABI at the protocol price, either way.
+func TestAgreedFromIssuePrice(t *testing.T) {
+	r := good()
+	for _, ask := range []uint64{50*PricePerUnit - 1, 50*PricePerUnit + 1, 1, 0} {
+		if _, err := agreedFromIssue(r.Outputs, bank, bi, "bank2", "RD", ask); err == nil {
+			t.Errorf("RD ask %d for 50 DFABI accepted", ask)
+		}
+	}
+}
+
 func TestValidate(t *testing.T) {
-	ok := Award{Bank: view.Identity("bank2"), IssueType: "DFABI", IssueAmount: 1, PayType: "RD", PayAmount: 1}
+	ok := Award{Bank: view.Identity("bank2"), IssueType: "DFABI", IssueAmount: 1, PayType: "RD", PayAmount: PricePerUnit}
 	if err := ok.validate(); err != nil {
 		t.Fatal(err)
 	}
 	for name, mod := range map[string]func(*Award){
-		"empty bank":    func(a *Award) { a.Bank = nil },
-		"same types":    func(a *Award) { a.PayType = a.IssueType },
-		"empty type":    func(a *Award) { a.IssueType = "" },
-		"zero DFABI":    func(a *Award) { a.IssueAmount = 0 },
-		"zero RD":       func(a *Award) { a.PayAmount = 0 },
-		"RD over bound": func(a *Award) { a.PayAmount = MaxAmount + 1 },
+		"empty bank":      func(a *Award) { a.Bank = nil },
+		"same types":      func(a *Award) { a.PayType = a.IssueType },
+		"empty type":      func(a *Award) { a.IssueType = "" },
+		"zero DFABI":      func(a *Award) { a.IssueAmount = 0 },
+		"zero RD":         func(a *Award) { a.PayAmount = 0 },
+		"RD over bound":   func(a *Award) { a.PayAmount = MaxAmount + 1 },
+		"RD not at price": func(a *Award) { a.PayAmount = PricePerUnit - 1 },
 	} {
 		a := ok
 		mod(&a)

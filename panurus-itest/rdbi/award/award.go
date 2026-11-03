@@ -48,7 +48,11 @@ func (a *Award) validate() error {
 		return err
 	}
 
-	return checkAmount("RD", a.PayAmount)
+	if err := checkAmount("RD", a.PayAmount); err != nil {
+		return err
+	}
+
+	return checkPrice(a.IssueAmount, a.PayAmount)
 }
 
 type InitiatorView struct {

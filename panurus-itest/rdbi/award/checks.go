@@ -18,6 +18,19 @@ import (
 // ponytail: one fixed ceiling, make it a per-bank setting if banks need different limits.
 const MaxAmount uint64 = 1_000_000_000_000
 
+// PricePerUnit is the protocol price of one DFABI unit in RD, the same constant as Lensa's PRICE_PER_UNIT (domain.ts).
+// An award must pay exactly IssueAmount x PricePerUnit RD; MaxAmount x PricePerUnit fits in a uint64.
+const PricePerUnit uint64 = 1_000_000
+
+// checkPrice: the RD leg is exactly the DFABI leg at the protocol price.
+func checkPrice(issueAmount, payAmount uint64) error {
+	if payAmount != issueAmount*PricePerUnit {
+		return fmt.Errorf("RD %d is not %d DFABI x %d", payAmount, issueAmount, PricePerUnit)
+	}
+
+	return nil
+}
+
 // terms are the legs of one award: BI issues IssueAmount of IssueType to Bank, and Bank pays PayAmount of
 // PayType to BI.
 type terms struct {
@@ -136,6 +149,9 @@ func agreedFromIssue(outs []*ptoken.Output, mine, bi view.Identity, eid string, 
 		return terms{}, errors.New("the issued amount is too large")
 	}
 	if err := checkAmount("DFABI", q.Uint64()); err != nil {
+		return terms{}, err
+	}
+	if err := checkPrice(q.Uint64(), payAmount); err != nil {
 		return terms{}, err
 	}
 
