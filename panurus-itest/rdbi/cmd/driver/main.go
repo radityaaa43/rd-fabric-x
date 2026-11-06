@@ -54,6 +54,9 @@ var live = filepath.Join(os.Getenv("HOME"), ".fabricx-token", "live")
 
 func must(err error, what string) {
 	if err != nil {
+		if serving { // serve.go: fail the request, not the process
+			panic(failure{fmt.Sprintf("FAIL %s: %v", what, err)})
+		}
 		fmt.Fprintf(os.Stderr, "FAIL %s: %v\n", what, err)
 		os.Exit(1)
 	}
@@ -63,10 +66,15 @@ type viewClient interface {
 	CallView(fid string, in []byte) (any, error)
 }
 
-var clients = map[string]viewClient{}
+var (
+	clients   = map[string]viewClient{}
+	clientsMu sync.Mutex // serve.go handles requests concurrently
+)
 
 // node returns the gRPC view client of a node, built from the client-config.yaml NWO generated for it.
 func node(name string) viewClient {
+	clientsMu.Lock()
+	defer clientsMu.Unlock()
 	if c, ok := clients[name]; ok {
 		return c
 	}
@@ -384,6 +392,10 @@ func main() {
 		audited()
 	case "api": // JSON interface for the Lensa Privasi adapter, see api.go
 		api(os.Args[2:])
+	case "serve": // HTTP door of an OPA gateway, see serve.go
+		serve(os.Args[2:])
+	case "issuer-id":
+		issuerID(os.Args[2])
 	}
 }
 
