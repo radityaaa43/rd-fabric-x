@@ -350,7 +350,8 @@ def gateway(n):
          "volumeMounts": [{"name": "opa", "mountPath": "/config", "readOnly": True}]},
         {"name": "fxapi", "image": IMAGE, "command": ["rdbi-driver", "serve", node, "127.0.0.1:8080"],
          "env": [{"name": "HOME", "value": os.path.dirname(T)}, {"name": "FXGW_TLS", "value": "/mtls"}],
-         "readinessProbe": {"tcpSocket": {"port": 8080}, "periodSeconds": 5},
+         # fxapi listens on 127.0.0.1 only (behind Envoy), which a kubelet tcpSocket probe on the pod IP cannot reach
+         "readinessProbe": {"exec": {"command": ["bash", "-c", ": >/dev/tcp/127.0.0.1/8080"]}, "periodSeconds": 5},
          "resources": {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"memory": "256Mi"}},
          "securityContext": {"runAsUser": 10001, **ro},
          "volumeMounts": [{"name": "rdbi", "mountPath": T}, {"name": "mtls", "mountPath": "/mtls", "readOnly": True}]}]
