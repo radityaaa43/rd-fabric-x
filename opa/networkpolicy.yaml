@@ -1,0 +1,94 @@
+# Ingress rules for the Fabric-X token pods (ns fabricx), fabric-x/opa/DESIGN.md section 8. Ingress only, like the paladin
+# set: egress stays open (nodes dial the orderers, BI's committer and each other).
+#
+# A node's view door (FSC gRPC, the client API) is reachable only from its own party's gateway fx-gw-N, and from
+# rdbi-driver while it is scaled up for maintenance or e2e. Node-to-node traffic is the FSC p2p ports only, between
+# rdbi pods. Port per node (core.yaml: grpc, p2p, web; web disabled):
+#   issuer 5100/5101   endorser-1 5112/5113   (pod rdbi-bi)
+#   bank2  5103/5104   endorser-2 5115/5116   (pod rdbi-bank2)
+#   bank3  5106/5107   endorser-3 5118/5119   (pod rdbi-bank3)
+#   bank4  5109/5110   endorser-4 5121/5122   (pod rdbi-bank4)
+# Evidence (2026-11-06, read-only):
+#   - every node's core.yaml resolves all other nodes and endorsers by P2P address only (scripts/k8s.py node_config);
+#   - an idle conntrack snapshot of the 4 pods shows only outbound flows (orderer routers 7x50, assemblers 7x52,
+#     rdbi-bi to committer 5130/5140); no other pod connects in;
+#   - bank committers, Postgres and the libp2p bootstrap (127.0.0.1:5125) are pod-local (localhost);
+#   - the rdbi pods have no probes, so kubelet traffic needs no rule.
+# Not selected (unchanged): the committer, orderer, CA, explorer and fx-gw pods. fx-gw-N's door is guarded by mTLS
+# (client cert from the ~/.opa-mtls CA), as bank-gw-N's is; Lensa reaches it through kubectl port-forward.
+# Rollback: kubectl -n fabricx delete networkpolicy -l app.kubernetes.io/part-of=rdbi-netpol
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rdbi-bi-ingress
+  namespace: fabricx
+  labels: {app.kubernetes.io/part-of: rdbi-netpol}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: rdbi-bi}}
+  policyTypes: [Ingress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/part-of: rdbi}}}]
+    ports: [{port: 5101}, {port: 5113}]
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: fx-gw-1}}}]
+    ports: [{port: 5100}]
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: rdbi-driver}}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rdbi-bank2-ingress
+  namespace: fabricx
+  labels: {app.kubernetes.io/part-of: rdbi-netpol}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: rdbi-bank2}}
+  policyTypes: [Ingress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/part-of: rdbi}}}]
+    ports: [{port: 5104}, {port: 5116}]
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: fx-gw-2}}}]
+    ports: [{port: 5103}]
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: rdbi-driver}}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rdbi-bank3-ingress
+  namespace: fabricx
+  labels: {app.kubernetes.io/part-of: rdbi-netpol}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: rdbi-bank3}}
+  policyTypes: [Ingress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/part-of: rdbi}}}]
+    ports: [{port: 5107}, {port: 5119}]
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: fx-gw-3}}}]
+    ports: [{port: 5106}]
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: rdbi-driver}}}]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: rdbi-bank4-ingress
+  namespace: fabricx
+  labels: {app.kubernetes.io/part-of: rdbi-netpol}
+spec:
+  podSelector: {matchLabels: {app.kubernetes.io/name: rdbi-bank4}}
+  policyTypes: [Ingress]
+  ingress:
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/part-of: rdbi}}}]
+    ports: [{port: 5110}, {port: 5122}]
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: fx-gw-4}}}]
+    ports: [{port: 5109}]
+  - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: rdbi-driver}}}]
+---
+# fabricx-bank-c is the only fabricx-* namespace without default-deny-all (fabricx-bi, -bank-a, -bank-b have it).
+# It runs no pods today (Services only, fabricx.role=remote-proxy), so this changes no traffic; it closes the gap
+# for any pod added later. Same spec as fabricx-bank-a's. Rollback: kubectl -n fabricx-bank-c delete networkpolicy default-deny-all
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: fabricx-bank-c
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]

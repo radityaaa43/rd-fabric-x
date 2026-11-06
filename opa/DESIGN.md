@@ -113,12 +113,17 @@ buyer's own gateway:
 Ingress-only, like the paladin set. Each flow and its evidence (to be re-verified before apply by
 watching `ss`/conntrack in each pod):
 
-| Policy | Selects | Allows ingress from | Port(s) | Why |
-|---|---|---|---|---|
-| fx-gw | app=fx-gw | app=fx-gw (precheck); none else (Lensa enters via port-forward) | 8443 | gateway door |
-| rdbi-grpc-N | rdbi-bi / rdbi-bankN | fx-gw-N only | 5100 / 5103 / 5106 / 5109 | client views, own party only |
-| rdbi-p2p | part-of=rdbi | part-of=rdbi | p2p 5101,5104,5107,5110 + endorser 5112-5123 | endorsement, owner signatures, report to BI |
-| rdbi-committer | rdbi-bankN | to be listed from the pod's own Services (sidecar, query, db) | TBD with evidence | bank-local committer parts |
+File: `fabric-x/opa/networkpolicy.yaml`. Server dry-run passes. The evidence is in its header.
+
+| Policy | Selects | Allows ingress from | Port(s) |
+|---|---|---|---|
+| rdbi-<pod>-ingress | rdbi-bi / rdbi-bankN | part-of=rdbi | that pod's node and endorser p2p (5101+5113, 5104+5116, 5107+5119, 5110+5122) |
+| | | fx-gw-N only | that pod's view gRPC (5100 / 5103 / 5106 / 5109) |
+| | | rdbi-driver | all ports (maintenance or e2e only, while scaled up) |
+| default-deny-all | ns fabricx-bank-c (0 pods) | none | none |
+
+- Bank committers and Postgres are pod-local, so they need no rule. The rdbi pods have no probes.
+- fx-gw pods are not selected. Their door is guarded by mTLS, the same as bank-gw-N in ns paladin.
 
 rdbi-driver: after cut-over, scale to 0 (it holds all identities). It comes back up only for maintenance or e2e,
 with a lead go.
