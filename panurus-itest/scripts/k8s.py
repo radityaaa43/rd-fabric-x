@@ -14,6 +14,12 @@ are packed into one Secret per pod (sent to kubectl on stdin, never written to d
 
 usage: k8s.py apply [replicas]   Secrets, PVCs, Services, Deployments (replicas default 1)
        k8s.py seed               copy this host's node stores into the PVCs (Deployments at 0, local nodes stopped)
+       k8s.py gw render|apply N  OPA gateway fx-gw-N of party N (1 BI .. 4 Bank C), fabric-x/opa/DESIGN.md: Envoy (mTLS,
+                                 ext_authz) + OPA + fxapi (rdbi-driver serve, party N's view-client key only).
+                                 render prints the documents with Secret data left out; apply sends them to kubectl.
+                                 Needs $RDBI_HOME/live/issuer-identity.bin (rdbi-driver issuer-id <file>), the mTLS
+                                 files fx-gw-N.{crt,key} + ca.crt in $OPA_MTLS_DIR (besu/opa/mtls/gen-certs.sh) and
+                                 $OPA_KEYS_DIR/opa-config.yaml (besu/opa/keys.sh). FXGW_HOST pins the pod to one node.
 Env: IMAGE (rdbi image), RDBI_HOME (default ~/.fabricx-token), KUBECONFIG.
 """
 import base64, glob, io, json, os, re, secrets, subprocess, sys, tarfile
@@ -270,11 +276,123 @@ def seed():
         kubectl("delete", "pod", name, "--wait=true")
 
 
+GW_NODE = {1: "issuer", 2: "bank2", 3: "bank3", 4: "bank4"}
+GW_KEY = {1: "bi", 2: "bank-a", 3: "bank-b", 4: "bank-c"}  # who signs the gateway's bank bundle (node1's is BI's)
+ENVOY_IMAGE = "envoyproxy/envoy:v1.38.9"
+OPA_IMAGE = "openpolicyagent/opa:1.21.1-envoy-1-static"
+OPA_KEYS = os.environ.get("OPA_KEYS_DIR", os.path.expanduser("~/.opa-keys"))
+OPA_MTLS = os.environ.get("OPA_MTLS_DIR", os.path.expanduser("~/.opa-mtls"))
+
+
+def envoy_config(n):
+    """One door :8443, client cert required; every request body goes to OPA (gw/allow) first, fail closed."""
+    typed = lambda t, **kw: {"@type": "type.googleapis.com/envoy.extensions." + t, **kw}
+    authz = typed("filters.http.ext_authz.v3.ExtAuthz", transport_api_version="V3",
+                  with_request_body={"max_request_bytes": 65536, "allow_partial_message": False},
+                  failure_mode_allow=False,
+                  # above the 2s http.send of the daily limit
+                  grpc_service={"envoy_grpc": {"cluster_name": "opa"}, "timeout": "3s"})
+    hcm = typed("filters.network.http_connection_manager.v3.HttpConnectionManager", stat_prefix="fabricx",
+                route_config={"virtual_hosts": [{"name": "fxapi", "domains": ["*"], "routes": [{
+                    "match": {"prefix": "/"},
+                    # a transaction waits for finality (90s) and the report to BI
+                    "route": {"cluster": "fxapi", "timeout": "300s"},
+                    "typed_per_filter_config": {"envoy.filters.http.ext_authz": typed(
+                        "filters.http.ext_authz.v3.ExtAuthzPerRoute",
+                        check_settings={"context_extensions": {"target": "fabricx", "node": f"node{n}"}})}}]}]},
+                http_filters=[{"name": "envoy.filters.http.ext_authz", "typed_config": authz},
+                              {"name": "envoy.filters.http.router", "typed_config": typed("filters.http.router.v3.Router")}])
+    tls = typed("transport_sockets.tls.v3.DownstreamTlsContext", require_client_certificate=True, common_tls_context={
+        "tls_params": {"tls_minimum_protocol_version": "TLSv1_2"},
+        "tls_certificates": [{"certificate_chain": {"filename": "/mtls/tls.crt"}, "private_key": {"filename": "/mtls/tls.key"}}],
+        "validation_context": {"trusted_ca": {"filename": "/mtls/ca.crt"}}})
+    local = lambda name, port, h2=False: {
+        "name": name, "type": "STATIC", "connect_timeout": "1s",
+        "load_assignment": {"cluster_name": name, "endpoints": [{"lb_endpoints": [
+            {"endpoint": {"address": {"socket_address": {"address": "127.0.0.1", "port_value": port}}}}]}]},
+        **({"typed_extension_protocol_options": {"envoy.extensions.upstreams.http.v3.HttpProtocolOptions": typed(
+            "upstreams.http.v3.HttpProtocolOptions", explicit_http_config={"http2_protocol_options": {}})}} if h2 else {})}
+    return {"static_resources": {
+        "listeners": [{"name": "fabricx", "address": {"socket_address": {"address": "0.0.0.0", "port_value": 8443}},
+                       "filter_chains": [{"transport_socket": {"name": "envoy.transport_sockets.tls", "typed_config": tls},
+                                          "filters": [{"name": "envoy.filters.network.http_connection_manager", "typed_config": hcm}]}]}],
+        "clusters": [local("fxapi", 8080), local("opa", 9191, h2=True)]},
+        "admin": {"address": {"socket_address": {"address": "127.0.0.1", "port_value": 9901}}}}
+
+
+def gateway(n):
+    node, name = GW_NODE[n], f"fx-gw-{n}"
+    labels = {"app.kubernetes.io/part-of": "rdbi-gw", "app.kubernetes.io/name": name}
+    files, extra = set(), {}
+    cc = yaml.safe_load(open(f"{H}/live/{node}/client-config.yaml"))
+    cc["address"] = f"{node}:{port(cc['address'])}"
+    extra[f"live/{node}/client-config.yaml"] = yaml.safe_dump(rewrite(cc, files), sort_keys=False).encode()
+    extra["live/issuer-identity.bin"] = open(f"{H}/live/issuer-identity.bin", "rb").read()  # public, for redeem
+    mtls = {"tls.crt": open(f"{OPA_MTLS}/{name}.crt", "rb").read(), "tls.key": open(f"{OPA_MTLS}/{name}.key", "rb").read(),
+            "ca.crt": open(f"{OPA_MTLS}/ca.crt", "rb").read()}
+    ro = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}}
+    containers = [
+        {"name": "envoy", "image": ENVOY_IMAGE, "args": ["-c", "/config/envoy.yaml", "--log-level", "warn"],
+         "ports": [{"name": "fxapi", "containerPort": 8443}], "readinessProbe": {"tcpSocket": {"port": 8443}, "periodSeconds": 5},
+         "resources": resources("32Mi", "128Mi"), "securityContext": {"runAsUser": 10001, **ro},
+         "volumeMounts": [{"name": "envoy", "mountPath": "/config", "readOnly": True},
+                          {"name": "mtls", "mountPath": "/mtls", "readOnly": True}]},
+        {"name": "opa", "image": OPA_IMAGE,
+         "args": ["run", "--server", "--addr=localhost:8181", "--diagnostic-addr=0.0.0.0:8282", "--authorization=basic",
+                  "--config-file=/config/opa.yaml", f"--set=labels.gateway={name}",
+                  "--set=services.bundle-server.url=http://bundle-server.paladin.svc",
+                  "--set=services.sink.url=http://bundle-server.paladin.svc:8081",
+                  f"--set=bundles.bi.resource={n}/bi.tar.gz", f"--set=bundles.bank.resource={n}/bank.tar.gz",
+                  f"--set=bundles.bank.signing.keyid={GW_KEY[n]}"],
+         "readinessProbe": {"httpGet": {"path": "/health?plugins&bundles", "port": 8282}, "periodSeconds": 5},
+         "livenessProbe": {"httpGet": {"path": "/health", "port": 8282}, "periodSeconds": 10},
+         "resources": resources("64Mi", "256Mi"), "securityContext": {"runAsUser": 10001, **ro},
+         "volumeMounts": [{"name": "opa", "mountPath": "/config", "readOnly": True}]},
+        {"name": "fxapi", "image": IMAGE, "command": ["rdbi-driver", "serve", node, "127.0.0.1:8080"],
+         "env": [{"name": "HOME", "value": os.path.dirname(T)}, {"name": "FXGW_TLS", "value": "/mtls"}],
+         "readinessProbe": {"tcpSocket": {"port": 8080}, "periodSeconds": 5},
+         "resources": {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"memory": "256Mi"}},
+         "securityContext": {"runAsUser": 10001, **ro},
+         "volumeMounts": [{"name": "rdbi", "mountPath": T}, {"name": "mtls", "mountPath": "/mtls", "readOnly": True}]}]
+    volumes = [{"name": "files", "secret": {"secretName": f"{name}-files", "defaultMode": 0o400}}, {"name": "rdbi", "emptyDir": {}},
+               {"name": "mtls", "secret": {"secretName": f"{name}-mtls", "defaultMode": 0o444}},  # envoy and fxapi run as 10001
+               {"name": "envoy", "configMap": {"name": f"{name}-envoy"}}, {"name": "opa", "configMap": {"name": "fx-gw-opa"}}]
+    dep = deployment(name, 1, "set -e; tar xzf /secret/rdbi.tgz -C /rdbi; chown -R 10001:10001 /rdbi", containers, volumes)
+    dep["metadata"]["labels"] = dep["spec"]["template"]["metadata"]["labels"] = labels
+    dep["spec"]["strategy"] = {"type": "RollingUpdate", "rollingUpdate": {"maxSurge": 0, "maxUnavailable": 1}}  # no 2nd pod
+    if os.environ.get("FXGW_HOST"):
+        dep["spec"]["template"]["spec"]["nodeSelector"] = {**ZONE, "kubernetes.io/hostname": os.environ["FXGW_HOST"]}
+    meta = lambda kind_name: {"name": kind_name, "namespace": NS, "labels": labels}
+    return [secret(f"{name}-files", {"rdbi.tgz": pack(files, extra)}) | {"metadata": meta(f"{name}-files")},
+            secret(f"{name}-mtls", mtls) | {"metadata": meta(f"{name}-mtls")},
+            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(f"{name}-envoy"),
+             "data": {"envoy.yaml": yaml.safe_dump(envoy_config(n), sort_keys=False)}},
+            # the same OPA config (and bundle public keys) as bank-gw-opa-v2; ConfigMaps do not cross namespaces
+            {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta("fx-gw-opa") | {"labels": {"app.kubernetes.io/part-of": "rdbi-gw"}},
+             "data": {"opa.yaml": open(f"{OPA_KEYS}/opa-config.yaml").read()}},
+            dep,
+            {"apiVersion": "v1", "kind": "Service", "metadata": meta(name),
+             "spec": {"selector": {"app.kubernetes.io/name": name}, "ports": [{"name": "fxapi", "port": 8443, "targetPort": 8443}]}}]
+
+
+def gw(action, n):
+    docs = gateway(n)
+    if action == "apply":
+        print(kubectl("apply", "-f", "-", stdin=yaml.safe_dump_all(docs).encode()).decode(), end="")
+        return
+    for d in docs:  # render: never print key material
+        if d["kind"] == "Secret":
+            d["data"] = {k: f"<{len(v)} bytes base64>" for k, v in d["data"].items()}
+    print(yaml.safe_dump_all(docs, sort_keys=False), end="")
+
+
 if __name__ == "__main__":
     cmd = sys.argv[1] if len(sys.argv) > 1 else ""
     if cmd == "apply":
         apply(int(sys.argv[2]) if len(sys.argv) > 2 else 1)
     elif cmd == "seed":
         seed()
+    elif cmd == "gw" and len(sys.argv) == 4 and sys.argv[2] in ("render", "apply") and int(sys.argv[3]) in GW_NODE:
+        gw(sys.argv[2], int(sys.argv[3]))
     else:
         sys.exit(__doc__)
