@@ -142,6 +142,13 @@ with a lead go.
    replicas since L8 (2026-11-06) and is kept for rollback. Anyone who can scale it up or read Secrets
    (cluster-admin) has the old all-party path back. Decision after L9: delete the Secret, or keep it for operator use.
 
+Follow-up from L9 S6c (R2 shown 2026-11-06; report `.superpowers/sdd/2026-11-05-halaman-kebijakan/scenario-fabricx-S6c-report.md`):
+- With BI down, a bank transfer still commits with 3-of-4. The report to BI is "not delivered", and it is redelivered once BI is back (`op: report`).
+- However, it takes ~2m10s to submit and another ~2m10s for the report attempt, because both wait out a timeout to BI's endpoints. A Service with no endpoints drops the SYN instead of refusing it. Lensa's 120 s deadline therefore shows an error for a tx that commits.
+- Fix options, not applied:
+  1. A fabricx-specific, longer Lensa deadline, or reporting the run as pending.
+  2. A shorter endorsement/report timeout, or a different failover order, in the Panurus endorser-failover patch.
+
 ## 10. Footprint
 
 4 new pods `fx-gw-1..4` (ns fabricx), no PVC:
