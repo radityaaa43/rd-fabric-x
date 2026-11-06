@@ -138,6 +138,9 @@ with a lead go.
 5. Direct submission to orderer routers (NodePorts 30050..30350) with a party's keys: still needs 3-of-4 endorsement
    and owner signatures, so no unilateral move. Fabric's own policy covers this.
 6. DvP counterparty leg (section 3) if the initiator bypasses its gateway.
+7. Secret `rdbi-driver-files` (ns fabricx) still holds every party's view-client key. Deployment `rdbi-driver` is at 0
+   replicas since L8 (2026-11-06) and is kept for rollback. Anyone who can scale it up or read Secrets
+   (cluster-admin) has the old all-party path back. Decision after L9: delete the Secret, or keep it for operator use.
 
 ## 10. Footprint
 
