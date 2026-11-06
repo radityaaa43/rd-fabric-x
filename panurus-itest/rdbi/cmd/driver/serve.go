@@ -42,7 +42,7 @@ var (
 	party   string
 	gwOf    = map[string]int{bi: 1, "bank2": 2, "bank3": 3, "bank4": 4}
 	peerURL = "https://fx-gw-%d:8443/" // the counterparty's gateway (Envoy, mTLS), same namespace
-	peer    *http.Client                // mTLS client to the other gateways
+	peer    *http.Client               // mTLS client to the other gateways
 	tlsDir  = envOr("FXGW_TLS", "/mtls")
 )
 
@@ -78,7 +78,9 @@ type httpError struct {
 
 func (e httpError) Error() string { return e.msg }
 
-func bad(format string, a ...any) error { return httpError{http.StatusBadRequest, fmt.Sprintf(format, a...)} }
+func bad(format string, a ...any) error {
+	return httpError{http.StatusBadRequest, fmt.Sprintf(format, a...)}
+}
 
 func serve(args []string) {
 	if len(args) != 2 || gwOf[args[0]] == 0 {
