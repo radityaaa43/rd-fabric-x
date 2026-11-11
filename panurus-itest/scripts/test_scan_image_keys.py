@@ -78,7 +78,69 @@ class Scan(unittest.TestCase):
         self.assertNotEqual(scan(self.p).returncode, 0)
 
 
+class Allow(unittest.TestCase):
+    """the one known benign hit of the pinned Debian base (libgnutls30 embeds a PKCS8 self-test key): allowed by path AND file sha256 only"""
+    def setUp(self):
+        self.d = tempfile.TemporaryDirectory()
+        self.p = os.path.join(self.d.name, "image.tar")
+        self.lib = b"ELF" + KEY + b"tail"
+        self.allow = os.path.join(self.d.name, "allow.txt")
+
+    def tearDown(self):
+        self.d.cleanup()
+
+    def allow_line(self, path, data):
+        with open(self.allow, "w") as f:
+            f.write("# comment\n" + f"{path} {hashlib.sha256(data).hexdigest()}\n")
+
+    def run_scan(self):
+        return subprocess.run([sys.executable, "-I", os.path.join(HERE, "scan_image_keys.py"), self.p, "--allow", self.allow], capture_output=True, text=True)
+
+    def test_listed_path_and_hash_is_allowed_and_reported(self):
+        image_tar(self.p, [{"usr/lib/libgnutls.so": self.lib}, {"usr/local/bin/x": b"clean"}])
+        self.allow_line("usr/lib/libgnutls.so", self.lib)
+        r = self.run_scan()
+        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertIn("allowed (base image): usr/lib/libgnutls.so", r.stdout)
+        self.assertIn("0 private key blocks outside the allow-list", r.stdout)
+
+    def test_same_path_other_content_fails(self):
+        image_tar(self.p, [{"usr/lib/libgnutls.so": self.lib + b"changed"}])
+        self.allow_line("usr/lib/libgnutls.so", self.lib)
+        self.assertEqual(self.run_scan().returncode, 1)
+
+    def test_same_content_other_path_fails(self):
+        image_tar(self.p, [{"home/rdbi/key.pem": self.lib}])
+        self.allow_line("usr/lib/libgnutls.so", self.lib)
+        self.assertEqual(self.run_scan().returncode, 1)
+
+    def test_another_key_next_to_the_allowed_file_fails(self):
+        image_tar(self.p, [{"usr/lib/libgnutls.so": self.lib, "home/rdbi/own.pem": KEY}])
+        self.allow_line("usr/lib/libgnutls.so", self.lib)
+        r = self.run_scan()
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("home/rdbi/own.pem", r.stdout)
+
+    def test_malformed_allow_file_fails_closed(self):
+        image_tar(self.p, [{"a": b"x"}])
+        with open(self.allow, "w") as f:
+            f.write("only-one-field\n")
+        self.assertEqual(self.run_scan().returncode, 2)
+
+
 class PatchAllowList(unittest.TestCase):
+    def test_workflow_scan_step_cannot_pass_on_a_failed_scan(self):
+        # the first run printed "1 private key blocks" and the step still passed: `cmd | tee` has the exit status of tee unless pipefail is on
+        import yaml
+        wf = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(HERE)), ".github", "workflows", "rdbi-image.yml")))
+        st = [s for s in wf["jobs"]["image"]["steps"] if s.get("name", "").startswith("Scan the image layers")][0]
+        self.assertEqual(st.get("shell"), "bash")   # GitHub runs `bash -eo pipefail` for an explicit bash shell
+        self.assertIn("--allow panurus-itest/k8s/scan-allow.txt", st["run"])
+
+    def test_scan_allow_list_is_one_pinned_base_file(self):
+        lines = [l.split() for l in open(os.path.join(os.path.dirname(HERE), "k8s", "scan-allow.txt")) if l.strip() and not l.startswith("#")]
+        self.assertEqual(lines, [["usr/lib/x86_64-linux-gnu/libgnutls.so.30.34.3", "779b25d20249988bea2c1aa6bbeb218f5ae7ea8a9d30ce4f54ea37372965cc4b"]])
+
     def test_accepted_file_matches_the_patches_exactly(self):
         lines = [l.split() for l in open(os.path.join(PATCHES, "ACCEPTED.sha256")) if l.strip() and not l.startswith("#")]
         want = {name: h for h, name in lines}
