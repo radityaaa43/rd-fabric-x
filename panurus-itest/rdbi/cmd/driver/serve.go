@@ -43,7 +43,7 @@ var (
 	party   string
 	gwOf    = map[string]int{bi: 1, "bank2": 2, "bank3": 3, "bank4": 4}
 	peerURL = "https://fx-gw-%d:8443/" // the counterparty's gateway (Envoy, mTLS), same namespace
-	peer    *http.Client               // mTLS client to the other gateways
+	peers   = map[int]*http.Client{}   // mTLS client per gateway number, each trusting only THAT org's root CA (peerClients)
 	tlsDir  = envOr("FXGW_TLS", "/mtls")
 )
 
@@ -87,9 +87,9 @@ func serve(args []string) {
 	if len(args) != 2 || gwOf[args[0]] == 0 {
 		must(os.ErrInvalid, "usage: serve <issuer|bank2|bank3|bank4> <listen addr>")
 	}
-	c, err := peerClient()
-	must(err, "mTLS client")
-	party, serving, peer = args[0], true, c
+	c, err := peerClients(tlsDir)
+	must(err, "mTLS clients")
+	party, serving, peers = args[0], true, c
 	every, err := redeliverInterval(os.Getenv(envRedeliver))
 	must(err, "redelivery interval")
 	pending = newRealRedeliverer(party != bi)
@@ -101,21 +101,35 @@ func serve(args []string) {
 	must(srv.ListenAndServe(), "listen "+args[1])
 }
 
-func peerClient() (*http.Client, error) {
-	ca, err := os.ReadFile(filepath.Join(tlsDir, "ca.crt"))
+// peerFor returns the mTLS client of gateway m (1 = BI's issuer gateway, 2..4 the banks).
+func peerFor(m int) *http.Client { return peers[m] }
+
+// peerClients builds one client per gateway. Directory layout (the S16 render): ca-<M>.crt = org M's root CA, one certificate each,
+// tls.crt and tls.key = this gateway's peer identity. A client trusts only its own org's root, so a certificate for the name
+// fx-gw-<M> issued by another org's CA is refused (the old single pool accepted any of the four roots).
+func peerClients(dir string) (map[int]*http.Client, error) {
+	cert, err := tls.LoadX509KeyPair(filepath.Join(dir, "tls.crt"), filepath.Join(dir, "tls.key"))
 	if err != nil {
 		return nil, err
 	}
-	pool := x509.NewCertPool()
-	if !pool.AppendCertsFromPEM(ca) {
-		return nil, errors.New("no CA in ca.crt")
+	out := map[int]*http.Client{}
+	for m := 1; m <= 4; m++ {
+		name := fmt.Sprintf("ca-%d.crt", m)
+		raw, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			return nil, err
+		}
+		if n := strings.Count(string(raw), "BEGIN CERTIFICATE"); n != 1 {
+			return nil, fmt.Errorf("%s: want exactly one certificate, found %d", name, n)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(raw) {
+			return nil, fmt.Errorf("%s: no certificate", name)
+		}
+		out[m] = &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}}}
 	}
-	cert, err := tls.LoadX509KeyPair(filepath.Join(tlsDir, "tls.crt"), filepath.Join(tlsDir, "tls.key"))
-	if err != nil {
-		return nil, err
-	}
-	return &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
-		TLSClientConfig: &tls.Config{RootCAs: pool, Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}}}, nil
+	return out, nil
 }
 
 func handle(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +316,7 @@ func deliver(tx string) string {
 // (gateway down), is a deny: the swap is not submitted.
 func precheck(req request) error {
 	body, _ := json.Marshal(req)
-	resp, err := peer.Post(fmt.Sprintf(peerURL, gwOf[req.To]), "application/json", bytes.NewReader(body))
+	resp, err := peerFor(gwOf[req.To]).Post(fmt.Sprintf(peerURL, gwOf[req.To]), "application/json", bytes.NewReader(body))
 	if err != nil {
 		return httpError{http.StatusForbidden, "precheck at " + req.To + " unreachable: " + err.Error()}
 	}

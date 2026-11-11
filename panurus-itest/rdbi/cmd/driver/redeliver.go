@@ -265,10 +265,10 @@ func newRealRedeliverer(startup bool) *redeliverer {
 }
 
 // probeBI asks BI's own gateway for a read (usage), which makes fx-gw-1 call BI's node: 200 means BI answers.
-// The client shares the mTLS transport of the peer client (precheck) and has its own, shorter timeout.
+// The client shares the mTLS transport of BI's peer client (org 1's root only) and has its own, shorter timeout.
 func probeBI() error {
 	body, _ := json.Marshal(map[string]string{"op": "usage", "type": "RD", "since": time.Now().UTC().Format(time.RFC3339)})
-	c := &http.Client{Timeout: probeTimeout, Transport: peer.Transport}
+	c := &http.Client{Timeout: probeTimeout, Transport: peerFor(gwOf[bi]).Transport}
 	resp, err := c.Post(fmt.Sprintf(peerURL, gwOf[bi]), "application/json", bytes.NewReader(body))
 	if err != nil {
 		return err

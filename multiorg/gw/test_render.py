@@ -51,6 +51,14 @@ keys:
 GW_IPS = {"cluster1": {1: "10.0.1.1", 2: "10.0.1.2", 3: "10.0.1.3"}, "cluster2": {4: "8.8.8.4"}}
 
 
+def write_roots(root):
+    for m in (1, 2, 3, 4):
+        p = f"{root}/tlsx/org{m}/msp/tlscacerts/tlsca.pem"
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        with open(p, "w") as f:
+            f.write(CERT.replace("MIIgw", f"ROOT{m}"))
+
+
 def make_inputs(root):
     for n in ("issuer", "bank2", "bank3", "bank4"):
         os.makedirs(f"{root}/live/{n}")
@@ -63,13 +71,14 @@ def make_inputs(root):
         f.write(OPA_CFG)
     with open(f"{root}/gw.pem", "w") as f:
         f.write(CERT)
+    write_roots(root)
     with open(f"{root}/gw-ips.yaml", "w") as f:
         yaml.safe_dump(GW_IPS, f)
 
 
 def build(root, party, **kw):
     a = dict(templates=f"{root}/live", image=IMG, envoy_image=ENVOY, opa_image=OPA, opa_config=f"{root}/opa-config.yaml", gw_cert=f"{root}/gw.pem",
-             gw_ips=f"{root}/gw-ips.yaml")
+             gw_ips=f"{root}/gw-ips.yaml", tls_exchange=f"{root}/tlsx")
     a.update(kw)
     return list(yaml.safe_load_all(render.render(party, **a)))
 
@@ -109,7 +118,7 @@ class GwRender(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 build(self.root, "bi", **{k: "example.io/x:latest"})
         text = render.render("bi", templates=f"{self.root}/live", image=IMG, envoy_image=ENVOY, opa_image=OPA, opa_config=f"{self.root}/opa-config.yaml",
-                             gw_cert=f"{self.root}/gw.pem", gw_ips=f"{self.root}/gw-ips.yaml")
+                             gw_cert=f"{self.root}/gw.pem", gw_ips=f"{self.root}/gw-ips.yaml", tls_exchange=f"{self.root}/tlsx")
         self.assertNotIn(":latest", text)
 
     def test_envoy_forwards_verified_client_cert_to_opa(self):
@@ -193,6 +202,37 @@ class GwRender(unittest.TestCase):
             fx = [c for c in by(build(self.root, p), "Deployment", f"fx-gw-{n}")["spec"]["template"]["spec"]["containers"] if c["name"] == "fxapi"][0]
             vals = [e["value"] for e in fx["env"] if e["name"] == "RDBI_REDELIVER_INTERVAL"]
             self.assertEqual(vals, ["60s"], p)
+
+    def test_peer_volume_has_one_root_per_org_never_a_bundle(self):
+        for p, n in PARTIES.items():
+            docs = build(self.root, p)
+            cm = by(docs, "ConfigMap", f"fx-gw-{n}-peer-ca")
+            self.assertEqual(sorted(cm["data"]), ["ca-1.crt", "ca-2.crt", "ca-3.crt", "ca-4.crt"])
+            for m in (1, 2, 3, 4):
+                self.assertEqual(cm["data"][f"ca-{m}.crt"].count("BEGIN CERTIFICATE"), 1)
+                self.assertIn(f"ROOT{m}", cm["data"][f"ca-{m}.crt"])
+            vol = [v for v in by(docs, "Deployment", f"fx-gw-{n}")["spec"]["template"]["spec"]["volumes"] if v["name"] == "peer"][0]
+            srcs = vol["projected"]["sources"]
+            self.assertEqual([s["secret"]["name"] for s in srcs if "secret" in s], [f"fx-gw-{n}-peer"])
+            cms = [s["configMap"] for s in srcs if "configMap" in s]
+            self.assertEqual([c["name"] for c in cms], [f"fx-gw-{n}-peer-ca"])
+            self.assertEqual([i["path"] for i in cms[0]["items"]], ["ca-1.crt", "ca-2.crt", "ca-3.crt", "ca-4.crt"])
+            self.assertNotIn("ca-bundle.pem", yaml.safe_dump(vol))   # no bundle in /peer
+
+    def test_peer_roots_must_be_one_public_root_per_org(self):
+        os.remove(f"{self.root}/tlsx/org3/msp/tlscacerts/tlsca.pem")
+        with self.assertRaises(SystemExit):
+            build(self.root, "bi")
+        write_roots(self.root)
+        with open(f"{self.root}/tlsx/org2/msp/tlscacerts/tlsca.pem", "a") as f:
+            f.write(CERT.replace("MIIgw", "SECOND"))   # two certificates in one org file
+        with self.assertRaises(SystemExit):
+            build(self.root, "bi")
+        write_roots(self.root)
+        with open(f"{self.root}/tlsx/org1/msp/tlscacerts/tlsca.pem", "a") as f:
+            f.write("-----BEGIN PRIVATE KEY-----\nAA\n-----END PRIVATE KEY-----\n")
+        with self.assertRaises(SystemExit):
+            build(self.root, "bi")
 
     def test_client_config_points_at_the_gw_identity(self):
         docs = build(self.root, "bank-a")
@@ -279,7 +319,7 @@ class GwRender(unittest.TestCase):
 
     def test_cli_prints_yaml_and_applies_nothing(self):
         r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "render.py"), "bi", "--templates", f"{self.root}/live", "--image", IMG, "--envoy-image", ENVOY, "--opa-image", OPA,
-                            "--opa-config", f"{self.root}/opa-config.yaml", "--gw-cert", f"{self.root}/gw.pem", "--gw-ips", f"{self.root}/gw-ips.yaml"],
+                            "--opa-config", f"{self.root}/opa-config.yaml", "--gw-cert", f"{self.root}/gw.pem", "--gw-ips", f"{self.root}/gw-ips.yaml", "--tls-exchange", f"{self.root}/tlsx"],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(sum(1 for d in yaml.safe_load_all(r.stdout) if d and d["kind"] == "Deployment"), 1)

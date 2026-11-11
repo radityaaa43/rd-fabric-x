@@ -5,7 +5,7 @@ Status: PRE-STAGE. Repo-only; `render.py` prints YAML and applies nothing. Sourc
 ## Command
 ```
 python3 multiorg/gw/render.py <bi|bank-a|bank-b|bank-c> --templates ~/.fabricx-token/live --image <rdbi-node@sha256> --envoy-image <envoy@sha256> --opa-image <opa@sha256> \
-  --opa-config ~/.opa-keys/opa-config.yaml --gw-cert <public cert of identity <node>-gw> --gw-ips FILE [--lb-acl acl-ID --lb-range <ipv4>/32 ...]
+  --opa-config ~/.opa-keys/opa-config.yaml --gw-cert <public cert of identity <node>-gw> --gw-ips FILE --tls-exchange <exchange-s8e: org1..org4/msp/tlscacerts, ONE root per org> [--lb-acl acl-ID --lb-range <ipv4>/32 ...]
 ```
 No default for the images (digest or refusal), the OPA config (public keys only, a `PRIVATE KEY` refuses), or `--gw-ips` (the address of each gateway for peers in the OTHER cluster).
 
@@ -17,7 +17,8 @@ ConfigMaps `fx-gw-<N>-envoy`, `fx-gw-<N>-opa`, `fx-gw-<N>-client`; Services `fx-
 - `fx-gw-<N>-client-ca`: `ca.crt` = `bank-gw-ca-<N>` public CA (Lensa) + the 4 orgs' public TLS CAs (peer gateways).
 - `fx-gw-<N>-peer`: `tls.crt`, `tls.key` (identity `fx-gw-<N>-peer`, client + server EKU, SAN `fx-gw-<N>`). fxapi presents it to the other gateways (`FXGW_TLS=/peer`, `serve.go:104-117`).
 - `fx-gw-<N>-client`: `gw.key` (identity `<node>-gw`, client, org CA). Its public cert goes into the render (`--gw-cert`) and into ConfigMap `fx-gw-<N>-client`.
-- ConfigMap `rdbi-public` (S13, key `ca-bundle.pem`) is projected as the peer RootCAs and the node's TLS CA.
+- ConfigMap `fx-gw-<N>-peer-ca` (rendered, public): `ca-1.crt`..`ca-4.crt`, one root per org. Projected into `/peer` next to the peer identity: fxapi pins each peer gateway to ITS org's root (D4, `peerFor(M)` in the driver; needs the rdbi-node image of the S15 rebuild).
+- ConfigMap `rdbi-public` (S13, key `ca-bundle.pem`) is projected only as the node's TLS CA (`live/<node>/tls-ca.crt`).
 
 `enroll_gw.py <party> rd-fabricx-<party> --kubeconfig K --ca-url http://localhost:7054 --work /dev/shm/W --tls-exchange <exchange-s8e> --lensa-ca <public ca.crt FILE> --out <new dir>/org<N>`: the three identities are registered at the org's own CA, one `kubectl create` of the four Secrets, public tree `gw/{<node>-gw,fx-gw-<N>,fx-gw-<N>-peer}.pem` + MANIFEST. The Lensa CA is a FILE (besu hands the public `ca.crt` of `bank-gw-ca-<N>`, sha256 quoted on both sides); this tool never reads a Secret. Rehearsed against a real fabric-ca-server 1.5.22 (throwaway CA): the tls-profile certs verify (`-purpose sslserver` and `sslclient`, both EKU), SAN `fx-gw-<N>` + `fx-gw-<N>.<ns>.svc.cluster.local`, keys match the certs.
 
@@ -36,5 +37,5 @@ Trust bundle = Lensa CA + 4 TLS CAs, so any org CA can mint `CN=fx-gw-1`. Envoy 
 - NetworkPolicy is ingress-only; egress of the gateway pod is open (OPA to the bundle-server, fxapi to `<node>`, peers).
 - The node still lists the `<node>-admin` cert in `fsc.client.certs` until the S16 field-change line swaps it for the `<node>-gw` cert.
 
-## Known gap (record, closed at S15)
-A peer org that controls DNS or hostAliases in a gateway pod could impersonate a peer gateway server (fxapi trusts the 4 TLS CA roots, SAN match only). Per-peer pinning needs the driver (S15 rebuild).
+## Known gap closed by D4 (needs the rebuilt image)
+With the old driver (one RootCAs pool of the 4 roots) a peer org that controlled DNS or hostAliases in a gateway pod could impersonate a peer gateway server. The driver change `peerFor(M)` (root of org M only, `ca-<M>.crt`) closes it. The gateway Deployment must therefore run the rdbi-node digest built after this change; with an older digest `/peer/ca.crt` no longer exists and fxapi refuses to start (fail closed).

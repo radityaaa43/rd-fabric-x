@@ -3,7 +3,7 @@
 
 usage: render.py bi|bank-a|bank-b|bank-c --templates <live dir with <node>/client-config.yaml (+ issuer-identity.bin for bi)>
                  --image repo@sha256:HEX (rdbi-node: fxapi) --envoy-image repo@sha256:HEX --opa-image repo@sha256:HEX
-                 --opa-config FILE (opa.yaml + the PUBLIC `keys:` block, ~/.opa-keys/opa-config.yaml) --gw-cert FILE (public cert of identity <node>-gw)
+                 --tls-exchange DIR (org1..org4/msp/tlscacerts/*.pem: ONE root CA per org, public) --opa-config FILE (opa.yaml + the PUBLIC `keys:` block, ~/.opa-keys/opa-config.yaml) --gw-cert FILE (public cert of identity <node>-gw)
                  --gw-ips FILE ({cluster1:{N: addr}, cluster2:{N: addr}}: address of each gateway for peers in the OTHER cluster)
                  [--lb-acl acl-ID --lb-range <ipv4>/32 ...]
 Objects: ConfigMaps fx-gw-<N>-envoy, fx-gw-<N>-opa, fx-gw-<N>-client (client-config.yaml of the gateway's node, gateway cert, issuer-identity.bin for bi only),
@@ -12,8 +12,9 @@ Deployment fx-gw-<N> (envoy :8443 mTLS + ext_authz to OPA 127.0.0.1:9191, OPA bu
 hostAliases carry the cross-cluster peers. The LoadBalancer Service fx-gw-<N>-lb exists only with --lb-acl (existing ACL id, /32 ranges only).
 NOT rendered, custody step (multiorg/gw/make_secrets.py): Secrets fx-gw-<N>-server (tls.crt, tls.key from the org's own TLS CA), fx-gw-<N>-client-ca (ca.crt: bank-gw-ca-<N> + the 4 TLS CAs, public),
 fx-gw-<N>-peer (tls.crt, tls.key of identity fx-gw-<N>-peer), fx-gw-<N>-client (gw.key of identity <node>-gw).
+ConfigMap fx-gw-<N>-peer-ca holds ca-1.crt..ca-4.crt (one public root per org): fxapi trusts, per peer gateway, ONLY that org's root (D4, driver peerFor).
 """
-import argparse, base64, os, re, sys
+import argparse, base64, glob, os, re, sys
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -85,7 +86,7 @@ def opa_config_for(path, party):
     return yaml.safe_dump(cfg, sort_keys=False)
 
 
-def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert, gw_ips, lb=None):
+def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert, gw_ips, tls_exchange, lb=None):
     if party not in PARTY_N:
         die(f"party {party!r} must be one of {', '.join(PARTY_N)}")
     for what, v in (("--image", image), ("--envoy-image", envoy_image), ("--opa-image", opa_image)):
@@ -111,6 +112,15 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
         client["binaryData"] = {"issuer-identity.bin": base64.b64encode(open(ip, "rb").read()).decode()}
         live_items.append({"key": "issuer-identity.bin", "path": "live/issuer-identity.bin"})
 
+    roots = {}   # D4: fxapi pins each peer gateway to ITS org's root, so /peer holds ca-<M>.crt per org (never a bundle)
+    for m in (1, 2, 3, 4):
+        files = sorted(glob.glob(f"{tls_exchange}/org{m}/msp/tlscacerts/*.pem"))
+        if len(files) != 1:
+            die(f"{tls_exchange}/org{m}/msp/tlscacerts/*.pem: want exactly one root CA file, found {len(files)}")
+        pem = open(files[0]).read()
+        if pem.count("BEGIN CERTIFICATE") != 1 or "PRIVATE KEY" in pem:
+            die(f"{files[0]} must hold exactly one public certificate")
+        roots[f"ca-{m}.crt"] = pem
     ips = yaml.safe_load(open(gw_ips)) or {}
     peers = {m: q for q, m in PARTY_N.items() if m != n}
     same = {m: q for m, q in peers.items() if CLUSTER[q] == cluster}
@@ -124,7 +134,7 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
 
     docs = [{"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(f"{name}-envoy"), "data": {"envoy.yaml": yaml.safe_dump(envoy_config(n), sort_keys=False)}},
             {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(f"{name}-opa"), "data": {"opa.yaml": opa_config_for(opa_config, party)}},
-            client]
+            client, {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(f"{name}-peer-ca"), "data": roots}]
 
     def res(cpu, mem, lim):
         return {"requests": {"cpu": cpu, "memory": mem}, "limits": {"memory": lim}}
@@ -151,7 +161,7 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
                {"name": "home", "emptyDir": {}},
                {"name": "peer", "projected": {"defaultMode": 0o440, "sources": [
                    {"secret": {"name": f"{name}-peer", "items": [{"key": "tls.crt", "path": "tls.crt"}, {"key": "tls.key", "path": "tls.key"}]}},
-                   {"configMap": {"name": "rdbi-public", "items": [{"key": "ca-bundle.pem", "path": "ca.crt"}]}}]}},
+                   {"configMap": {"name": f"{name}-peer-ca", "items": [{"key": k, "path": k} for k in sorted(roots)]}}]}},
                {"name": "live", "projected": {"defaultMode": 0o440, "sources": [
                    {"configMap": {"name": f"{name}-client", "items": live_items}},
                    {"secret": {"name": f"{name}-client", "items": [{"key": "gw.key", "path": f"gw/{node}-gw.key"}]}},
@@ -191,15 +201,15 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("party")
-    for o in ("templates", "image", "envoy-image", "opa-image", "opa-config", "gw-cert", "gw-ips", "lb-acl"):
+    for o in ("templates", "image", "envoy-image", "opa-image", "opa-config", "gw-cert", "gw-ips", "tls-exchange", "lb-acl"):
         ap.add_argument(f"--{o}")
     ap.add_argument("--lb-range", action="append", default=[])
     a = ap.parse_args()
-    for o in ("templates", "image", "envoy_image", "opa_image", "opa_config", "gw_cert", "gw_ips"):
+    for o in ("templates", "image", "envoy_image", "opa_image", "opa_config", "gw_cert", "gw_ips", "tls_exchange"):
         if not getattr(a, o):
             die(f"--{o.replace('_', '-')} is required")
     lb = {"acl_id": a.lb_acl, "ranges": a.lb_range} if a.lb_acl else None
-    sys.stdout.write(render(a.party, a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, a.gw_cert, a.gw_ips, lb))
+    sys.stdout.write(render(a.party, a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, a.gw_cert, a.gw_ips, a.tls_exchange, lb))
 
 
 if __name__ == "__main__":
