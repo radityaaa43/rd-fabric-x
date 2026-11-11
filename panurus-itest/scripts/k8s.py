@@ -159,31 +159,32 @@ def secret(name, data):
             "type": "Opaque", "data": {k: base64.b64encode(v).decode() for k, v in data.items()}}
 
 
-def deployment(pod, replicas, init, containers, volumes):
+def deployment(pod, replicas, init, containers, volumes, restricted=False, extra_init=()):
     labels = {**LABELS, "app.kubernetes.io/name": pod}
     return {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": pod, "namespace": NS, "labels": labels},
             "spec": {"replicas": replicas, "strategy": {"type": "Recreate"},
                      "selector": {"matchLabels": {"app.kubernetes.io/name": pod}},
                      "template": {"metadata": {"labels": labels}, "spec": {
                          "imagePullSecrets": [{"name": "ghcr-pull"}], "nodeSelector": ZONE,
-                         "initContainers": [{"name": "unpack", "image": IMAGE, "securityContext": {"runAsUser": 0},
+                         "initContainers": [{"name": "unpack", "image": IMAGE, "securityContext": {"runAsUser": 10001 if restricted else 0},
                                              "command": ["sh", "-c", init], "resources": resources("16Mi", "128Mi"),
                                              "volumeMounts": [{"name": "files", "mountPath": "/secret"},
                                                               {"name": "rdbi", "mountPath": "/rdbi"}] +
-                                             ([{"name": "state", "mountPath": "/state"}] if any(v["name"] == "state" for v in volumes) else [])}],
+                                             ([{"name": "state", "mountPath": "/state"}] if any(v["name"] == "state" for v in volumes) else [])}, *extra_init],
                          "containers": containers, "volumes": volumes}}}}
 
 
-def institution(pod, replicas):
-    docs, files, extra = [], set(), {}
-    containers, init = [], "set -e; tar xzf /secret/rdbi.tgz -C /rdbi; chown -R 10001:10001 /rdbi"
+def institution(pod, replicas, restricted=False):
+    """restricted: no root-only steps (PSS restricted namespaces): fsGroup owns the volumes instead of chown."""
+    docs, files, extra, extra_init = [], set(), {}, []
+    containers, init = [], "set -e; tar xzf /secret/rdbi.tgz -C /rdbi" + ("" if restricted else "; chown -R 10001:10001 /rdbi")
     for n in PODS[pod]:
         core, p, query = node_config(n, files)
         extra[f"live/{n}/core.yaml"] = yaml.safe_dump(core, sort_keys=False, width=200).encode()
         docs.append({"apiVersion": "v1", "kind": "Service", "metadata": {"name": n, "namespace": NS, "labels": LABELS},
                      "spec": {"selector": {"app.kubernetes.io/name": pod},
                               "ports": [{"name": k, "port": v, "targetPort": v} for k, v in p.items()]}})
-        init += f"; mkdir -p /state/{n}; chown -R 10001:10001 /state/{n}"
+        init += f"; mkdir -p /state/{n}" + ("" if restricted else f"; chown -R 10001:10001 /state/{n}")
         wait = "; ".join(f"until (: >/dev/tcp/{h}/{p}) 2>/dev/null; do sleep 2; done"
                          for h, p in (a.rsplit(":", 1) for a in (core["fabric"]["default"]["peers"][0]["address"], query)))
         containers.append({
@@ -199,7 +200,13 @@ def institution(pod, replicas):
     if pod in BANK:
         extra.update(committer_files(pod))
         data["db-password"] = db_password(pod).encode()
-        init += "; mkdir -p /state/ledger /state/pgdata; chown 10001:10001 /state/ledger; chown 999:999 /state/pgdata; chmod 700 /state/pgdata"
+        if restricted:  # postgres (uid 999) must own pgdata with mode 700; it can create it inside the fsGroup-writable volume
+            init += "; mkdir -p /state/ledger"
+            extra_init.append({"name": "pgdata", "image": PG_IMAGE, "securityContext": {"runAsUser": 999},
+                               "command": ["sh", "-c", "set -e; mkdir -p /state/pgdata; chmod 700 /state/pgdata"],
+                               "volumeMounts": [{"name": "state", "mountPath": "/state"}], "resources": resources("16Mi", "128Mi")})
+        else:
+            init += "; mkdir -p /state/ledger /state/pgdata; chown 10001:10001 /state/ledger; chown 999:999 /state/pgdata; chmod 700 /state/pgdata"
         pw = lambda var: {"name": var, "valueFrom": {"secretKeyRef": {"name": f"{pod}-files", "key": "db-password"}}}
         cfg = {"name": "rdbi", "mountPath": "/config", "subPath": "committer"}
         for svc in ("verifier", "vc", "coordinator", "sidecar", "query"):
@@ -222,7 +229,7 @@ def institution(pod, replicas):
     volumes = [{"name": "files", "secret": {"secretName": f"{pod}-files", "defaultMode": 0o400}},
                {"name": "rdbi", "emptyDir": {}},
                {"name": "state", "persistentVolumeClaim": {"claimName": f"{pod}-state"}}]
-    docs.append(deployment(pod, replicas, init, containers, volumes))
+    docs.append(deployment(pod, replicas, init, containers, volumes, restricted, extra_init))
     return docs
 
 
@@ -417,17 +424,28 @@ def render(org, ns):
     if not re.search(r"@sha256:[0-9a-f]{64}$", IMAGE):
         sys.exit("k8s.py render: IMAGE must be pinned by digest (repo@sha256:<64 hex>)")
     NS = ns
-    docs = institution(ORG_POD[org], 0)  # replicas 0: applying the render starts nothing
+    docs = institution(ORG_POD[org], 0, restricted=True)  # replicas 0: applying the render starts nothing
     for d in redact(docs):
         if d["kind"] == "Deployment":
             spec = d["spec"]["template"]["spec"]
             d["spec"]["template"]["metadata"]["labels"]["party"] = org
+            # PSS restricted (label enforce=restricted on rd-fabricx-*): the volumes' group is fsGroup, every container drops ALL
+            spec["securityContext"] = {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}, "fsGroup": 10001}
+            for init, c in [(True, c) for c in spec["initContainers"]] + [(False, c) for c in spec["containers"]]:
+                c["securityContext"] = {**c.get("securityContext", {}), "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+                if c["name"] == "db":
+                    c["securityContext"]["runAsUser"] = 999  # the postgres image user
+                c["securityContext"]["runAsNonRoot"] = True
+                c["resources"]["limits"]["cpu"] = "200m" if init else "1"
+                c["resources"]["requests"]["ephemeral-storage"] = "64Mi"
+                c["resources"]["limits"]["ephemeral-storage"] = "512Mi"
             spec["affinity"] = {
                 "nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [
                     {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": AVOID_NODES}]}]}},
                 # soft: a pod of another party on the same node is allowed when no other node fits
                 "podAntiAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": 100, "podAffinityTerm": {
-                    "topologyKey": "kubernetes.io/hostname", "labelSelector": {"matchExpressions": [
+                    "topologyKey": "kubernetes.io/hostname", "namespaceSelector": {},  # all namespaces: the other parties live elsewhere
+                    "labelSelector": {"matchExpressions": [
                         {"key": "app.kubernetes.io/part-of", "operator": "In", "values": ["rdbi"]},
                         {"key": "party", "operator": "NotIn", "values": [org]}]}}}]}}
     print(yaml.safe_dump_all(docs, sort_keys=False), end="")

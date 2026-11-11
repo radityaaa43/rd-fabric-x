@@ -87,6 +87,60 @@ class Render(unittest.TestCase):
             if d["kind"] == "Deployment":
                 self.assertEqual(d["spec"]["replicas"], 0)
 
+    def test_anti_affinity_reaches_other_namespaces(self):
+        # a podAffinityTerm without namespaceSelector only looks at the pod's own namespace: party NotIn [org] would never match
+        def selects(sel, labels):
+            for e in sel["matchExpressions"]:
+                v = labels.get(e["key"])
+                ok = (v in e["values"]) if e["operator"] == "In" else (v not in e["values"])
+                if not ok:
+                    return False
+            return True
+        for org in ("bi", "bank-a", "bank-b"):
+            _, docs = self.docs(org)
+            for pod in self.pods(docs):
+                term = pod["affinity"]["podAntiAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"][0]["podAffinityTerm"]
+                self.assertEqual(term["namespaceSelector"], {})
+                sel = term["labelSelector"]
+                other = {"app.kubernetes.io/part-of": "rdbi", "party": "other-party"}
+                self.assertTrue(selects(sel, other))                                   # repels another party's pod
+                self.assertFalse(selects(sel, {**other, "party": org}))                # not its own party
+                self.assertFalse(selects(sel, {"party": "other-party"}))               # not unrelated pods
+
+    def test_pss_restricted(self):
+        for org in ("bi", "bank-a", "bank-b"):
+            out, docs = self.docs(org)
+            for pod in self.pods(docs):
+                sc = pod["securityContext"]
+                self.assertIs(sc["runAsNonRoot"], True)
+                self.assertEqual(sc["seccompProfile"], {"type": "RuntimeDefault"})
+                self.assertEqual(sc["fsGroup"], 10001)
+                for c in pod["initContainers"] + pod["containers"]:
+                    with self.subTest(org=org, container=c["name"]):
+                        s = c["securityContext"]
+                        self.assertIs(s["allowPrivilegeEscalation"], False)
+                        self.assertEqual(s["capabilities"]["drop"], ["ALL"])
+                        self.assertNotIn(s.get("runAsUser", 1), (0,))
+                        self.assertIs(s.get("runAsNonRoot", True), True)
+                        self.assertFalse(s.get("privileged", False))
+                        self.assertNotIn("chown", " ".join(c.get("command", [])))     # no root-only chown: fsGroup does it
+        _, docs = self.docs("bank-a")
+        pod = self.pods(docs)[0]
+        db = next(c for c in pod["containers"] if c["name"] == "db")
+        self.assertEqual(db["securityContext"]["runAsUser"], 999)
+        pg = next(c for c in pod["initContainers"] if c["name"] == "pgdata")
+        self.assertEqual(pg["securityContext"]["runAsUser"], 999)
+        self.assertIn("chmod 700 /state/pgdata", " ".join(pg["command"]))
+
+    def test_cpu_limit_and_ephemeral_storage_everywhere(self):
+        for org in ("bi", "bank-a", "bank-b"):
+            for pod in self.pods(self.docs(org)[1]):
+                for c in pod["initContainers"] + pod["containers"]:
+                    with self.subTest(org=org, container=c["name"]):
+                        self.assertIn("cpu", c["resources"]["limits"])
+                        self.assertIn("ephemeral-storage", c["resources"]["limits"])
+                        self.assertIn("ephemeral-storage", c["resources"]["requests"])
+
     def test_affinity(self):
         for org in ("bi", "bank-a", "bank-b"):
             out, docs = self.docs(org)
