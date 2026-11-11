@@ -1,0 +1,38 @@
+name: rdbi
+# rdbi unit tests (award, cmd/driver) inside a clone of Panurus v0.24.0 with our patches.
+# Runs only when its inputs change. The Ginkgo suite (needs docker Fabric-X) is not run.
+on:
+  pull_request:
+    paths:
+      - 'panurus-itest/**'
+      - '.github/workflows/rdbi.yml'
+permissions:
+  contents: read
+jobs:
+  rdbi:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Clone Panurus v0.24.0 and check the pin
+        run: |
+          git clone -q --depth 1 --branch v0.24.0 https://github.com/LFDT-Panurus/panurus.git panurus
+          test "$(git -C panurus rev-parse HEAD)" = 5f3c49e2d9e4507138ef330d34d60ec560fd1525
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: panurus/integration/go.mod
+          cache: true
+          cache-dependency-path: panurus/integration/go.sum
+      - name: Patch Panurus and FSC, copy rdbi
+        run: |
+          (cd panurus/integration && go get gopkg.in/yaml.v3@v3.0.1)
+          make -C panurus-itest SRC="$PWD/panurus" WORK="$PWD" fsc-patch panurus-patch
+          mkdir -p panurus/integration/token/fungible/rdbi
+          cp -r panurus-itest/rdbi/. panurus/integration/token/fungible/rdbi/
+      - name: go vet and go test
+        working-directory: panurus/integration
+        run: |
+          go vet ./token/fungible/rdbi/award/... ./token/fungible/rdbi/cmd/driver/...
+          go test -count=1 ./token/fungible/rdbi/award/... ./token/fungible/rdbi/cmd/driver/...
