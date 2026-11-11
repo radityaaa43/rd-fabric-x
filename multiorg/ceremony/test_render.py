@@ -209,6 +209,14 @@ class Locked(Base):
             {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "orderer-router-1"}}}], "ports": [{"port": 8013, "protocol": "TCP"}]},
             {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
 
+    def test_probe_ip_allow_form_is_one_host_one_port(self):
+        np = self.by(self.probe(allow=["ip=10.200.0.1/32:443"]), "NetworkPolicy")["spec"]
+        self.assertEqual(np["egress"], [{"to": [{"ipBlock": {"cidr": "10.200.0.1/32"}}], "ports": [{"port": 443, "protocol": "TCP"}]}])
+        for bad in ("ip=10.200.0.0/24:443", "ip=0.0.0.0/32:443", "ip=10.200.0.1/32:0", "ip=10.200.0.1:443", "ip=300.1.1.1/32:443"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    self.probe(allow=[bad])
+
     def test_probe_without_allow_has_no_egress_rules(self):
         np = self.by(self.probe(), "NetworkPolicy")
         self.assertNotIn("egress", np["spec"])

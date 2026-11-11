@@ -2,7 +2,7 @@
 """Print the objects of the in-namespace re-issue of ONE FSC identity cert (fabricx S13 fix: the p2p listener serves fsc/cert.pem, whose SAN must carry the names peers dial). stdout only, nothing applied.
 
 usage: reenroll_render.py role <party>
-       reenroll_render.py job <party> <node> --image repo@sha256:HEX --name GEN --api-cidr <ipv4>/32
+       reenroll_render.py job <party> <node> --image repo@sha256:HEX --name GEN --api-cidr <ipv4>/32 [--mode run|dry-run|remove-prev]
 `role`: SA fsc-reenroll + Role fsc-reenroll (ONLY secrets get+patch, resourceNames [rdbi-<pod>-files]) + RoleBinding. TIME-BOXED: the operator creates it right before the org's Job and removes it right after (R13 log).
 `job`: NetworkPolicy + Job fsc-reenroll-<node>-<GEN> in rd-fabricx-<party>, applied by the org's OWN party-admin (the existing time-boxed s14-sign Role lets it create Jobs):
   image (digest, contains fabric-ca-client + the `fsc-reenroll` helper) runs `fabric-ca-client reenroll --csr.hosts <node>,<node>.<ns>.svc.cluster.local` authenticated by the CURRENT identity cert+key mounted from
@@ -51,7 +51,9 @@ def egress(spec):
     return {"to": [{"ipBlock": {"cidr": val[0]}}], "ports": [{"port": val[1], "protocol": "TCP"}]}
 
 
-def render_job(party, node, image, name, api_cidr):
+def render_job(party, node, image, name, api_cidr, mode="run"):
+    if mode not in ("run", "dry-run", "remove-prev"):
+        die("--mode must be run, dry-run or remove-prev")
     n, pod, nodes, ns = check(party)
     if node not in nodes:
         die(f"node {node!r} is not a node of {party} ({', '.join(nodes)})")
@@ -70,7 +72,14 @@ def render_job(party, node, image, name, api_cidr):
                    "egress": [egress(("pod", (f"fca-org{n}", 7054))), egress(("ip", (api_cidr, 443))), egress("dns")]}}
     sec = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}, "runAsNonRoot": True, "runAsUser": UID}
     cmd = ["fsc-reenroll", "--node", node, "--ca-url", f"http://fca-org{n}.{ns}.svc.cluster.local:7054", "--hosts", f"{node},{node}.{ns}.svc.cluster.local", "--names", NAMES,
-           "--secret", secret, "--in", "/in", "--work", "/work", "--keys", ",".join(keys)]
+           "--secret", secret, "--in", "/in", "--work", "/work", "--keys", ",".join(keys), "--gen", name]
+    if mode != "run":
+        cmd.append("--" + mode)
+    volumes = [{"name": "work", "emptyDir": {"medium": "Memory"}}]
+    mounts = [{"name": "work", "mountPath": "/work"}]
+    if mode != "remove-prev":   # remove-prev needs no identity at all: it only nulls the two .prev-<gen> keys
+        volumes.insert(0, {"name": "in", "secret": {"secretName": secret, "defaultMode": 0o440, "items": [{"key": keys[0], "path": "cert.pem"}, {"key": keys[1], "path": "key.pem"}]}})
+        mounts.insert(0, {"name": "in", "mountPath": "/in", "readOnly": True})
     job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta(job_name, {"app.kubernetes.io/name": app}),
            "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 180, "ttlSecondsAfterFinished": 900,
                     "template": {"metadata": {"labels": {**LABELS, "app.kubernetes.io/name": app, LOCK: "true"}}, "spec": {
@@ -78,10 +87,9 @@ def render_job(party, node, image, name, api_cidr):
                         "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "fsGroup": UID, "seccompProfile": {"type": "RuntimeDefault"}},
                         "imagePullSecrets": [{"name": "ghcr-pull"}],
                         "containers": [{"name": "reenroll", "image": image, "command": cmd, "securityContext": sec,
-                                        "volumeMounts": [{"name": "in", "mountPath": "/in", "readOnly": True}, {"name": "work", "mountPath": "/work"}],
+                                        "volumeMounts": mounts,
                                         "resources": {"requests": {"cpu": "20m", "memory": "32Mi", "ephemeral-storage": "8Mi"}, "limits": {"cpu": "500m", "memory": "128Mi", "ephemeral-storage": "16Mi"}}}],
-                        "volumes": [{"name": "in", "secret": {"secretName": secret, "defaultMode": 0o440, "items": [{"key": keys[0], "path": "cert.pem"}, {"key": keys[1], "path": "key.pem"}]}},
-                                    {"name": "work", "emptyDir": {"medium": "Memory"}}]}}}}
+                        "volumes": volumes}}}}
     return yaml.safe_dump_all([np, job], sort_keys=False)
 
 
@@ -92,13 +100,14 @@ def main():
     ap.add_argument("node", nargs="?")
     for o in ("image", "name", "api-cidr"):
         ap.add_argument(f"--{o}")
+    ap.add_argument("--mode", default="run")
     a = ap.parse_args()
     if a.what == "role":
         sys.stdout.write(render_role(a.party))
     else:
         if not (a.node and a.image and a.name and a.api_cidr):
             die("job needs <node> --image --name --api-cidr")
-        sys.stdout.write(render_job(a.party, a.node, a.image, a.name, a.api_cidr))
+        sys.stdout.write(render_job(a.party, a.node, a.image, a.name, a.api_cidr, a.mode))
 
 
 if __name__ == "__main__":
