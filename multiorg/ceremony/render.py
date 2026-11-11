@@ -108,7 +108,7 @@ def render_job(party, tx, cacert, image, tx_name):
 
 def egress_rule(spec):
     if spec == "dns":
-        return {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}
+        return {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}
     nsp = re.fullmatch(r"nspod=(rd-fabricx-[a-z0-9-]+)/([a-z0-9]([a-z0-9-]*[a-z0-9])?):(\d{1,5})", spec)
     if nsp:   # another rd-fabricx-* namespace's pod, by selectors (ipBlock does not match in-cluster pod IPs on this CNI: live probes 2026-11-11 p3pre)
         if not 0 < int(nsp.group(4)) < 65536:

@@ -92,7 +92,7 @@ class Job(unittest.TestCase):
             {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "fca-org3"}}}], "ports": [{"port": 7054, "protocol": "TCP"}]},
             {"to": [{"ipBlock": {"cidr": "172.24.11.240/32"}}], "ports": [{"port": 6443, "protocol": "TCP"}]},
             {"to": [{"ipBlock": {"cidr": "172.24.40.81/32"}}], "ports": [{"port": 6443, "protocol": "TCP"}]},
-            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
+            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
 
     def test_modes_add_exactly_one_flag(self):
         cmd = lambda **kw: by(self.job(**kw), "Job")["spec"]["template"]["spec"]["containers"][0]["command"]

@@ -45,7 +45,7 @@ def render_role(party):
 
 def egress(spec):
     if spec == "dns":
-        return {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}
+        return {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}
     kind, val = spec
     if kind == "pod":
         return {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": val[0]}}}], "ports": [{"port": val[1], "protocol": "TCP"}]}

@@ -207,7 +207,7 @@ class Locked(Base):
             self.assertEqual(pod["metadata"]["labels"][k], v)
         self.assertEqual(np["spec"]["egress"], [
             {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "orderer-router-1"}}}], "ports": [{"port": 8013, "protocol": "TCP"}]},
-            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
+            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
 
     def test_probe_ip_allow_form_is_one_host_one_port(self):
         np = self.by(self.probe(allow=["ip=10.200.0.1/32:443"]), "NetworkPolicy")["spec"]
@@ -296,7 +296,7 @@ class Net(Base):
             render.check_locked(self.net(k))
 
     def test_egress_is_exactly_the_named_endpoints_plus_dns(self):
-        dns = {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}
+        dns = {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}
         pod = lambda a, p: {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": a}}}], "ports": [{"port": p, "protocol": "TCP"}]}
         sub, rb = self.by(self.net("submit"), "NetworkPolicy"), self.by(self.net("readback"), "NetworkPolicy")
         self.assertEqual(sub["spec"]["egress"], [pod("orderer-router-1", 8013), pod("committer-sidecar", 5130), dns])
@@ -368,7 +368,7 @@ class SetupPP(Base):
         self.assertNotIn("ingress", np)
         self.assertEqual(np["egress"], [
             {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "rdbi-bi"}}}], "ports": [{"port": 5100, "protocol": "TCP"}]},
-            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
+            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
 
     def test_hardened_and_checked(self):
         spec = self.by(self.pp(), "Job")["spec"]["template"]["spec"]
