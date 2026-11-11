@@ -11,6 +11,7 @@ import yaml
 N = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
 IMAGE = "ghcr.io/hyperledger/fabric-ca@sha256:87c36f0b655838e2c3b00379cafc6efb36dc6f8d88b2cec9c707fd47e93b1c63"  # 1.5.22, as running today
 PORT = 7054
+ZONE = {"topology.kubernetes.io/zone": "ap-southeast-5b"}  # as panurus-itest/scripts/k8s.py: the nodes with free disk slots
 
 
 def render(party):
@@ -35,6 +36,7 @@ def render(party):
          "spec": {"replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": {"app.kubernetes.io/name": name}},
                   "template": {"metadata": {"labels": labels}, "spec": {
                       "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "seccompProfile": {"type": "RuntimeDefault"}, "fsGroup": 10001},
+                      **({"nodeSelector": ZONE} if party != "bank-c" else {}),  # cluster 1: the disk binds to the first pod's zone
                       "containers": [{
                           "name": "fabric-ca", "image": IMAGE, "command": ["sh", "-c", "fabric-ca-server start -b admin:$ADMIN_PASS --tls.enabled=false"],
                           "env": env, "ports": [{"name": "api", "containerPort": PORT}],

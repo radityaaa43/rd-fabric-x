@@ -44,6 +44,14 @@ class Manifests(unittest.TestCase):
                 self.assertIn("requests", c["resources"])
             self.assertEqual(dep["spec"]["strategy"], {"type": "Recreate"})   # one PVC, ReadWriteOnce
 
+    def test_zone_pinned_on_cluster1_only(self):
+        # WaitForFirstConsumer binds the disk to the zone of its first pod; the nodes with free disk slots are in 5b (k8s.py ZONE)
+        for p in ("bi", "bank-a", "bank-b"):
+            dep = next(x for x in docs(p) if x["kind"] == "Deployment")
+            self.assertEqual(dep["spec"]["template"]["spec"]["nodeSelector"], {"topology.kubernetes.io/zone": "ap-southeast-5b"})
+        dep = next(x for x in docs("bank-c") if x["kind"] == "Deployment")
+        self.assertNotIn("nodeSelector", dep["spec"]["template"]["spec"])   # cluster 2: zone/nodes named by PRE, not guessed
+
     def test_no_secret_material_in_manifest(self):
         out = render.render("bank-a")
         self.assertNotIn("Secret", [x["kind"] for x in docs("bank-a")])
