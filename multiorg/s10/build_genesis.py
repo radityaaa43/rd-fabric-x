@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Build the Arma genesis block from the four orgs' PUBLIC exchange trees (fabricx S10 prep; no cluster, no key read).
 
-usage: build_genesis.py --exchange DIR --armageddon BIN --sample-config DIR --out DIR --heads 1=<sha256>,2=...
+usage: build_genesis.py [--dry-run] --exchange DIR --armageddon BIN --sample-config DIR --out DIR --heads 1=<sha256>,2=...
 DIR holds org1..org4 (output of multiorg/fca/enroll.py). BIN is armageddon built from hyperledger/fabric-x-orderer@dd296e3 and
 --sample-config its testutil/fabric/sampleconfig. --heads (required on the command line) are the sha256 of each org's MANIFEST.sha256 as the org announced it.
-Steps: check_exchange on every org (refuse otherwise) -> certs-only baseDir -> shared_config.yaml from endpoints.yaml (Consensus,
+--dry-run accepts placeholder hosts (`*.lb.<party>`) and keeps neither the block nor the base dir (pipeline proof only);
+a real build refuses placeholder hosts and any port outside the plan. Steps: check_exchange on every org (refuse otherwise) -> certs-only baseDir -> shared_config.yaml from endpoints.yaml (Consensus,
 Batching and MaxPartyID are copied from upstream's own `generate` output, run in a scratch dir with throwaway keys that is shredded)
 -> `createBlock` run INSIDE baseDir (its shared-config paths resolve against the CWD) -> prints the block's sha256 as JSON.
 """
@@ -13,6 +14,10 @@ import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 import check_exchange
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "fca"))
+import enroll
+
+PLACEHOLDER_HOST = re.compile(r"\.lb\.(bi|bank-a|bank-b|bank-c)$")   # `<role>-<N>.lb.<party>`: not a real LB host yet
 
 TEMPLATE_HOSTS = "{role}-{n}.example.invalid"
 
@@ -69,7 +74,7 @@ def party_config(exchange, base, n):
             "AssemblerConfig": {"TLSCert": f"{role('assembler')}/tls/server.crt", "Host": ep["assembler"]["Host"], "Port": ep["assembler"]["Port"]}}
 
 
-def build(exchange, armageddon, sample, out, manifest_heads=None):
+def build(exchange, armageddon, sample, out, manifest_heads=None, dry_run=False):
     parties = sorted(int(d[3:]) for d in os.listdir(exchange) if re.fullmatch(r"org\d+", d))
     if len(parties) < 4 or parties != list(range(1, len(parties) + 1)):
         die(f"need org1..orgN with N >= 4 in {exchange}, found {parties}")
@@ -77,6 +82,13 @@ def build(exchange, armageddon, sample, out, manifest_heads=None):
         found = check_exchange.problems(f"{exchange}/org{n}", n)
         if found:
             die(f"org{n} exchange tree is not clean: {'; '.join(found[:5])}")
+        if not dry_run:   # a real build only takes the port plan and real hosts; a dry run may use placeholders
+            ep = yaml.safe_load(open(f"{exchange}/org{n}/endpoints.yaml"))
+            for role, v in ep.items():
+                if enroll.PORT_PLAN.get(role) != v["Port"]:
+                    die(f"org{n}: {role} port {v['Port']} is not the planned {enroll.PORT_PLAN.get(role)} (regenerate with regen_endpoints.py)")
+                if PLACEHOLDER_HOST.search(v["Host"]):
+                    die(f"org{n}: {role} host {v['Host']} is a placeholder: --dry-run only, until S16 gives the real LB hosts")
         if manifest_heads is not None and manifest_heads.get(n) != sha256_file(f"{exchange}/org{n}/MANIFEST.sha256"):
             die(f"org{n}: MANIFEST.sha256 hash differs from the one the org announced")
     if os.path.exists(out) and os.listdir(out):
@@ -97,11 +109,17 @@ def build(exchange, armageddon, sample, out, manifest_heads=None):
                         f"--blockOutput={block}", f"--sampleConfigPath={os.path.realpath(sample)}"], cwd=base, capture_output=True, text=True)
     if r.returncode:
         die(f"createBlock failed (rc {r.returncode}): {r.stderr[-400:]}")
-    return {"parties": parties, "block": f"{block}/bootstrap.block", "sha256": sha256_file(f"{block}/bootstrap.block")}
+    digest = sha256_file(f"{block}/bootstrap.block")
+    if dry_run:   # proves the pipeline only: the block and the base dir are not kept
+        shutil.rmtree(block)
+        shutil.rmtree(base)
+        return {"dry_run": True, "parties": parties, "block": None, "sha256": digest}
+    return {"dry_run": False, "parties": parties, "block": f"{block}/bootstrap.block", "sha256": digest}
 
 
 if __name__ == "__main__":
-    a, opt = sys.argv[1:], {}
+    a, opt = [x for x in sys.argv[1:] if x != "--dry-run"], {}
+    dry = "--dry-run" in sys.argv[1:]
     while len(a) >= 2 and a[0].startswith("--"):
         opt[a[0]], a = a[1], a[2:]
     if a or not {"--exchange", "--armageddon", "--sample-config", "--out"} <= set(opt):
@@ -112,4 +130,4 @@ if __name__ == "__main__":
         heads = {int(k): v for k, v in (kv.split("=") for kv in opt["--heads"].split(","))}
     except ValueError:
         die("--heads must look like 1=<sha256>,2=<sha256>,...")
-    print(json.dumps(build(opt["--exchange"], opt["--armageddon"], opt["--sample-config"], opt["--out"], heads), indent=1))
+    print(json.dumps(build(opt["--exchange"], opt["--armageddon"], opt["--sample-config"], opt["--out"], heads, dry_run=dry), indent=1))
