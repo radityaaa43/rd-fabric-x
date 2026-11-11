@@ -20,9 +20,9 @@ def problems(root, n):
     if not [r for r in roles if r.startswith("batcher")]:
         out.append(f"missing role dir {base}/batcher<k>")
     for r in roles:
-        must.append(f"{base}/{r}/tls/*.pem")
+        must.append(f"{base}/{r}/tls/server.crt")
         if r.startswith("batcher") or r == "consenter":
-            must.append(f"{base}/{r}/msp/signcerts/*.pem")
+            must.append(f"{base}/{r}/msp/signcerts/{r}-cert.pem")
     out += [f"missing {m}" for m in must if not glob.glob(f"{root}/{m}")]
     try:
         ep = yaml.safe_load(open(f"{root}/endpoints.yaml"))
