@@ -460,6 +460,14 @@ class Hardening(Base):
                             for res in ("cpu", "memory", "ephemeral-storage"):
                                 self.assertIn(res, c["resources"][side], (side, res))
 
+    def test_orderer_requests_resized_limits_unchanged(self):
+        # GO resize (orchestrator, 2026-11-12): requests 50m/128Mi -> 30m/64Mi for all four roles; limits and ephemeral-storage unchanged
+        for p in PARTIES:
+            for name, s in self.sts(p).items():
+                c = s["spec"]["template"]["spec"]["containers"][0]
+                self.assertEqual(c["resources"]["requests"], {"cpu": "30m", "memory": "64Mi", "ephemeral-storage": "64Mi"}, name)
+                self.assertEqual(c["resources"]["limits"], {"cpu": "1", "memory": "512Mi", "ephemeral-storage": "512Mi"}, name)
+
     def test_secrets_mounted_with_the_four_keys(self):
         for p, n in PARTIES.items():
             for r in ROLES:
