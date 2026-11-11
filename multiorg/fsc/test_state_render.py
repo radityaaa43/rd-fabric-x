@@ -92,6 +92,15 @@ class Render(unittest.TestCase):
         rb = script("remove-backup")
         self.assertEqual(re.findall(r"rm -f ([^\n;]*)", rb), ['"$S/$n/default.sqlite.bak-g1" "$S/$n/default.sqlite-wal.bak-g1" "$S/$n/default.sqlite-shm.bak-g1"'])
 
+    def test_remove_backup_is_colocated_with_the_fsc_pod_others_are_not(self):
+        # the state PVC is ReadWriteOnce and attached to the node of the running FSC pod: a Job on another node dies with Multi-Attach (live 2026-11-12, bi)
+        for p, pod in POD.items():
+            aff = by(job("remove-backup", p), "Job")["spec"]["template"]["spec"].get("affinity")
+            term = aff["podAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+            self.assertEqual(term, [{"labelSelector": {"matchLabels": {"app.kubernetes.io/name": f"rdbi-{pod}"}}, "topologyKey": "kubernetes.io/hostname"}])
+        for mode in ("count", "b-prime", "restore"):   # these run with the FSC pod scaled to 0: an affinity to it would leave the Job Pending
+            self.assertNotIn("affinity", by(job(mode), "Job")["spec"]["template"]["spec"], mode)
+
     def test_nodes_of_each_party(self):
         for p, nodes in NODES.items():
             s = script("count", p)
