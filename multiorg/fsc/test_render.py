@@ -196,6 +196,12 @@ class Network(Base):
         self.assertEqual(grpc, [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "fx-gw-2"}}}])
         p2p = [r for r in np["ingress"] if {p["port"] for p in r["ports"]} == {tcr.GRPC["bank2"] + 1, tcr.GRPC["endorser-2"] + 1}]
         self.assertEqual(len(p2p), 1)
+        # P2P: the arma shape that passes both the eni health checks and the cross-cluster peers (proven on lb-1..4), never any source
+        self.assertEqual(p2p[0]["from"], [{"namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}}}, {"ipBlock": {"cidr": "47.237.84.150/32"}}, {"ipBlock": {"cidr": "100.64.0.0/10"}}])
+        for party, want in (("bank-c", [{"ipBlock": {"cidr": "8.215.62.92/32"}}, {"ipBlock": {"cidr": "100.64.0.0/10"}}]),):
+            c = self.by(self.r(party), "NetworkPolicy")["rdbi-traffic"]["spec"]
+            pc = [r for r in c["ingress"] if "fx-gw" not in str(r.get("from"))]
+            self.assertEqual(pc[0]["from"], want)   # cluster 2: no namespace selector, the other cluster's egress + the CLB health check
 
     def test_no_p2p_service_by_default_and_flag_makes_a_cluster_policy_acl_service(self):
         self.assertNotIn("rdbi-p2p-bank2", self.by(self.r("bank-a"), "Service"))

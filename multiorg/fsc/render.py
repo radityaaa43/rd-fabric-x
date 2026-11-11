@@ -137,10 +137,13 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
     own_g, own_p = sorted(p2p_ports[x][0] for x in nodes), sorted(p2p_ports[x][1] for x in nodes)
     all_p = sorted(v[1] for v in p2p_ports.values())
     arma_ips = arma.IPS[cluster]
+    peers_from = ([{"namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}}}] if cluster == "cluster1" else []) + [{"ipBlock": {"cidr": arma.PEER_EGRESS[cluster]}}, {"ipBlock": {"cidr": arma.CLB_HEALTH}}]
     docs.append({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta("rdbi-traffic"),
                  "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": f"rdbi-{pod}"}}, "policyTypes": ["Ingress", "Egress"],
                           "ingress": [{"from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": f"fx-gw-{n}"}}}], "ports": [{"protocol": "TCP", "port": v} for v in own_g]},
-                                      {"ports": [{"protocol": "TCP", "port": v} for v in own_p]}],   # P2P from the other orgs: the CLB ACL is the filter, eTP Cluster hides the source
+                                      # P2P from the other orgs: the shape proven on the arma CLBs (lb-1..4, 2026-11-12): the org namespaces of this cluster, the OTHER cluster's egress /32
+                                      # and the CLB health check source (backend-type eni); never any source. The CLB ACL stays the first filter.
+                                      {"from": peers_from, "ports": [{"protocol": "TCP", "port": v} for v in own_p]}],
                           "egress": [{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
                                      {"to": [{"podSelector": {}}]},
                                      {"to": [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in sorted({*p2p_ips[cluster].values(), *arma_ips.values()})],
