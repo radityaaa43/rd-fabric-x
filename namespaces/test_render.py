@@ -109,6 +109,24 @@ class Render(unittest.TestCase):
         for p in PARTIES:
             self.assertNotIn("cluster", self.docs(p)[0]["metadata"]["labels"])
 
+    def test_ns_only_cluster2_is_only_the_namespace(self):  # GO 1: the first cluster-2 write
+        r = self.run_cli("--cluster", "2", "--ns-only", "bank-c")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        docs = list(yaml.safe_load_all(r.stdout))
+        self.assertEqual([(d["kind"], d["metadata"]["name"]) for d in docs], [("Namespace", "rd-fabricx-bank-c")])
+        self.assertEqual(docs[0]["metadata"]["labels"]["cluster"], "2")
+        self.assertEqual(docs[0]["metadata"]["labels"]["pod-security.kubernetes.io/enforce"], "restricted")
+        # GO 2 is the full render: it starts with the same Namespace doc and has 6 more
+        full = list(yaml.safe_load_all(self.run_cli("--cluster", "2", "bank-c").stdout))
+        self.assertEqual(len(full), 7)
+        self.assertEqual(full[0], docs[0])
+        self.assertEqual(render.render("bank-c", cluster=2, ns_only=True), r.stdout)
+
+    def test_ns_only_keeps_the_guards(self):
+        self.assertNotEqual(self.run_cli("--ns-only", "bank-c").returncode, 0)             # bank-c needs --cluster 2
+        self.assertNotEqual(self.run_cli("--cluster", "2", "--ns-only", "bi").returncode, 0)
+        self.assertEqual(self.run_cli("--ns-only", "bank-c").stdout, "")
+
     def test_bad_cluster_refused(self):
         self.assertNotEqual(self.run_cli("--cluster", "3", "bank-c").returncode, 0)
 
