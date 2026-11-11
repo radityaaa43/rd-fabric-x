@@ -27,7 +27,9 @@ createBlock)
   # every path in the shared config must exist relative to the cwd, and no private key may be below the cwd
   grep -E '^\s*(- )?(SignCert|TLSCert|CACerts|TLSCACerts)?:? *crypto/' "$sc" | sed 's/.*\(crypto\/[^ ]*\)/\1/' | while read p; do [ -f "$p" ] || { echo "missing $p" >&2; exit 3; }; done || exit 3
   if grep -rl "PRIVATE KEY" . >/dev/null 2>&1; then echo "private key below baseDir" >&2; exit 4; fi
-  mkdir -p "$bo"; echo "FAKE BLOCK" > "$bo/bootstrap.block";;
+  mkdir -p "$bo"; echo "FAKE BLOCK" > "$bo/bootstrap.block"
+  # like the real createBlock: the org MSP files (cacerts, admincerts, knowncerts, ...) end up in the block (checked on the real tool); STUB_DROP removes one dir
+  find crypto -name '*.pem' | sort | while read f; do case "$f" in *"/$STUB_DROP/"*) ;; *) cat "$f" >> "$bo/bootstrap.block";; esac; done;;
 esac
 """
 
@@ -41,6 +43,8 @@ def make_exchange(root, parties=(1, 2, 3, 4)):
         ep = {r: {"Host": f"{r}-{n}.fabricx.example.org", "Port": p} for r, p in PORTS.items()}
         with open(os.path.join(d, "endpoints.yaml"), "w") as f:
             yaml.safe_dump(ep, f)
+        tce.write(d, "msp/admincerts/admin-%d-cert.pem" % n, tce.CERT.replace("MIIB", "ADM%d" % n))
+        tce.write(d, "msp/knowncerts/endorser-%d-cert.pem" % n, tce.CERT.replace("MIIB", "KNC%d" % n))
         tce.manifest(d)
 
 
@@ -136,6 +140,39 @@ class Build(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(self.log, "argv.log")))                  # the pipeline really ran
         with self.assertRaises(SystemExit):
             build_genesis.build(ex2, self.arma, self.sample, os.path.join(self.tmp.name, "real"))
+
+    def test_real_build_requires_admin_and_known_certs_dry_run_does_not(self):
+        import shutil
+        for sub, why in (("admincerts", "admin"), ("knowncerts", "endorser")):
+            with self.subTest(missing=why):
+                t = tempfile.TemporaryDirectory()
+                ex = os.path.join(t.name, "ex")
+                make_exchange(ex)
+                shutil.rmtree(os.path.join(ex, "org3", "msp", sub))
+                tce.manifest(os.path.join(ex, "org3"))
+                os.remove(os.path.join(self.log, "argv.log")) if os.path.exists(os.path.join(self.log, "argv.log")) else None
+                with self.assertRaises(SystemExit) as cm:
+                    build_genesis.build(ex, self.arma, self.sample, os.path.join(t.name, "out"))
+                self.assertIn(f"msp/{sub}", str(cm.exception.code))
+                self.assertFalse(os.path.exists(os.path.join(self.log, "argv.log")))        # armageddon never started
+                r = build_genesis.build(ex, self.arma, self.sample, os.path.join(t.name, "dry"), dry_run=True)
+                self.assertTrue(r["dry_run"])
+                t.cleanup()
+
+    def test_block_assertions_report_counts_and_catch_a_missing_cert(self):
+        r = self.run_build()
+        self.assertEqual(r["assertions"], {"admincerts": 4, "knowncerts": 4})
+        for drop, key in (("admincerts", "admin"), ("knowncerts", "known")):
+            with self.subTest(drop=drop):
+                os.environ["STUB_DROP"] = drop
+                try:
+                    out = os.path.join(self.tmp.name, "out-" + drop)
+                    with self.assertRaises(SystemExit) as cm:
+                        build_genesis.build(self.ex, self.arma, self.sample, out)
+                    self.assertIn(drop, str(cm.exception.code))
+                    self.assertFalse(os.path.exists(os.path.join(out, "block", "bootstrap.block")))   # a block failing the assertions is not kept
+                finally:
+                    os.environ.pop("STUB_DROP")
 
     def test_cli_requires_heads(self):
         # a real build without the announced hashes would skip the check: the CLI refuses it

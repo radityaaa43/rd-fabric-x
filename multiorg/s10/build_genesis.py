@@ -58,6 +58,26 @@ def upstream_defaults(armageddon, sample, gen):
         shred_tree(gen)
 
 
+def assert_block(block_path, base, parties, dry_run):
+    """Offline proof that the files really reached the block: every admincerts and knowncerts PEM of every org has its first base64 line in the
+    block bytes (checked on the real createBlock: a unique cert in msp/knowncerts and one in msp/admincerts each appeared twice, a control block 0 times)."""
+    with open(block_path, "rb") as f:
+        data = f.read()
+    counts = {}
+    for sub in ("admincerts", "knowncerts"):
+        counts[sub] = 0
+        for n in parties:
+            pems = sorted(glob.glob(f"{base}/crypto/ordererOrganizations/org{n}/msp/{sub}/*.pem"))
+            if not pems and not dry_run:
+                die(f"org{n}: no msp/{sub}/*.pem in the base dir")
+            for p in pems:
+                lines = [l for l in open(p).read().splitlines() if l and not l.startswith("-----")]
+                if not lines or lines[0].encode() not in data:
+                    die(f"org{n}: {os.path.basename(p)} from msp/{sub} is NOT in the block: the {sub} did not reach the genesis")
+                counts[sub] += 1
+    return counts
+
+
 def party_config(exchange, base, n):
     org = f"crypto/ordererOrganizations/org{n}"
     rel = lambda p: os.path.relpath(p, base)
@@ -79,7 +99,8 @@ def build(exchange, armageddon, sample, out, manifest_heads=None, dry_run=False)
     if len(parties) < 4 or parties != list(range(1, len(parties) + 1)):
         die(f"need org1..orgN with N >= 4 in {exchange}, found {parties}")
     for n in parties:
-        found = check_exchange.problems(f"{exchange}/org{n}", n)
+        # a real build needs the S8 admin cert and the endorser cert (known_certs) in every org MSP; a dry run only proves the pipeline
+        found = check_exchange.problems(f"{exchange}/org{n}", n, require_admin=not dry_run, require_known=not dry_run)
         if found:
             die(f"org{n} exchange tree is not clean: {'; '.join(found[:5])}")
         if not dry_run:   # a real build only takes the port plan and real hosts; a dry run may use placeholders
@@ -109,12 +130,17 @@ def build(exchange, armageddon, sample, out, manifest_heads=None, dry_run=False)
                         f"--blockOutput={block}", f"--sampleConfigPath={os.path.realpath(sample)}"], cwd=base, capture_output=True, text=True)
     if r.returncode:
         die(f"createBlock failed (rc {r.returncode}): {r.stderr[-400:]}")
+    try:
+        counts = assert_block(f"{block}/bootstrap.block", base, parties, dry_run)
+    except SystemExit:
+        shutil.rmtree(block, ignore_errors=True)   # a block that fails the assertions is never kept, so it cannot be distributed
+        raise
     digest = sha256_file(f"{block}/bootstrap.block")
     if dry_run:   # proves the pipeline only: the block and the base dir are not kept
         shutil.rmtree(block)
         shutil.rmtree(base)
-        return {"dry_run": True, "parties": parties, "block": None, "sha256": digest}
-    return {"dry_run": False, "parties": parties, "block": f"{block}/bootstrap.block", "sha256": digest}
+        return {"dry_run": True, "parties": parties, "block": None, "sha256": digest, "assertions": counts}
+    return {"dry_run": False, "parties": parties, "block": f"{block}/bootstrap.block", "sha256": digest, "assertions": counts}
 
 
 if __name__ == "__main__":

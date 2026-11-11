@@ -2,6 +2,7 @@
 """Enroll one party's four Arma roles at its own fca-org<N> and keep the keys only as Secrets (fabricx S9).
 
 usage: enroll.py init   <party> rd-fabricx-<party> --kubeconfig K --work W
+       enroll.py admin|endorser <party> rd-fabricx-<party> --kubeconfig K --ca-url http://localhost:7054 --work W --src <public tree> --dst <new tree> [--generation TAG]
        enroll.py enroll <party> rd-fabricx-<party> --kubeconfig K --ca-url http://localhost:7054 --work W --out exchange/org<N> [--extra-san <host|ip> | --extra-san <role>=<host|ip>]... [--generation TAG]
 One org at a time (sequential): W under /dev/shm only (tmpfs, umask 077 set by the script); destroy W before the next org starts.
 init creates the admin password Secret (apply render.py's CA manifest after it). enroll runs `fabric-ca-client` (msp + tls profile)
@@ -160,13 +161,13 @@ def enroll(party, ns, kubeconfig, ca_url, work, out, extra_sans=(), generation="
     Credentials travel only in the fabric-ca-client environment (FABRIC_CA_CLIENT_URL), never on a command line.
     [unverified live] that the client reads FABRIC_CA_CLIENT_URL and prints `Password: <x>` on a register without --id.secret
     (Fabric CA users guide): the window-start throwaway enroll settles it."""
-    n = check_target(party, ns)
-    work = check_work(work)
-    sans = parse_extra_sans(extra_sans)
-    gen = check_generation(generation) if generation else ""
-    replace_secrets = bool(gen) if replace_secrets is None else replace_secrets
+    work = check_work(work)   # path guard first: destroy() below only ever touches a /dev/shm path
     secrets = []
     try:
+        n = check_target(party, ns)
+        sans = parse_extra_sans(extra_sans)
+        gen = check_generation(generation) if generation else ""
+        replace_secrets = bool(gen) if replace_secrets is None else replace_secrets
         pw = read(f"{work}/admin.pass").strip()
         secrets.append(pw)
         base_env = {**os.environ, "FABRIC_CA_CLIENT_HOME": f"{work}/client"}
@@ -194,8 +195,72 @@ def enroll(party, ns, kubeconfig, ca_url, work, out, extra_sans=(), generation="
         destroy(work)
 
 
+# One more CA identity per org, besides the four Arma roles. The cert goes into a COPY of the public tree, the key only into a Secret.
+#   admin    (PLAN S8)  type admin,  msp/admincerts/admin-<N>-cert.pem,    Secret orderer-admin-<N>-secret: the org MSP's admin, or no config tx can be authorized
+#   endorser (lead Q1)  type client, msp/knowncerts/endorser-<N>-cert.pem, Secret fsc-endorser-<N>-secret: FSC endorser cert for FabricMSPConfig.known_certs (S13 uses the key)
+KINDS = {"admin": {"type": "admin", "dir": "admincerts", "secret": "orderer-admin-{n}-secret"},
+         "endorser": {"type": "client", "dir": "knowncerts", "secret": "fsc-endorser-{n}-secret"}}
+
+
+def identity(kind, party, ns, kubeconfig, ca_url, work, src, dst, generation=""):
+    """Register and enroll <kind>-<N>[-gen] at the org's own CA; cert -> dst/msp/<dir>/<kind>-<N>-cert.pem (dst = a COPY of src with a new MANIFEST, must
+    not exist); key + cert -> Secret (create; keys msp-keystore-priv_sk, msp-signcert.pem). Same custody rules as enroll(): credentials in the environment
+    only, work dir under /dev/shm and destroyed in a finally (also on a refusal). Needs the CA admin password in W/admin.pass and a port-forward."""
+    work = check_work(work)   # path guard first: destroy() below only ever touches a /dev/shm path
+    secrets = []
+    try:
+        if kind not in KINDS:
+            sys.exit(f"enroll.py: identity kind {kind!r} must be one of {', '.join(KINDS)}")
+        k = KINDS[kind]
+        n = check_target(party, ns)
+        gen = check_generation(generation) if generation else ""
+        if os.path.exists(dst):
+            sys.exit(f"enroll.py: {dst} must be a new directory (the source tree is never modified)")
+        found = check_exchange.problems(src, n)
+        if found:
+            sys.exit("enroll.py: source tree is not clean: " + "; ".join(found[:3]))
+        if glob.glob(f"{src}/msp/{k['dir']}/*.pem"):
+            sys.exit(f"enroll.py: the source tree already has msp/{k['dir']}: use a source tree without it")
+        pw = read(f"{work}/admin.pass").strip()
+        secrets.append(pw)
+        base_env = {**os.environ, "FABRIC_CA_CLIENT_HOME": f"{work}/client"}
+        creds = lambda who, secret: {**base_env, "FABRIC_CA_CLIENT_URL": ca_url.replace("://", f"://{who}:{secret}@")}
+        adminmsp = f"{work}/admin-msp"
+        sh("fabric-ca-client", "enroll", "-M", adminmsp, env=creds("admin", pw), secrets=secrets)
+        who = f"{kind}-{n}" + (f"-{gen}" if gen else "")
+        reg = sh("fabric-ca-client", "register", "-u", ca_url, "-M", adminmsp, "--id.name", who, "--id.type", k["type"], env=base_env, secrets=secrets)
+        m = re.search(r"Password:\s*(\S+)", reg)
+        if not m:
+            sys.exit(f"enroll.py: register of {who} printed no generated password")
+        secrets.append(m.group(1))
+        sh("fabric-ca-client", "enroll", "-M", f"{work}/ident/msp", env=creds(who, m.group(1)), secrets=secrets)
+        cert = read(first(f"{work}/ident/msp/signcerts/*.pem"))
+        key = read(first(f"{work}/ident/msp/keystore/*_sk"))
+        shutil.copytree(src, dst)
+        write(f"{dst}/msp/{k['dir']}/{kind}-{n}-cert.pem", cert)
+        lines = sorted(f"{hashlib.sha256(open(p, 'rb').read()).hexdigest()}  {os.path.relpath(p, dst)}\n"
+                       for d, _, names in os.walk(dst) for x in names if x != "MANIFEST.sha256" for p in [os.path.join(d, x)])
+        write(f"{dst}/MANIFEST.sha256", "".join(lines))
+        found = check_exchange.problems(dst, n)
+        if found:
+            shutil.rmtree(dst)
+            sys.exit("enroll.py: new tree is not clean: " + "; ".join(found[:3]))
+        secret = {"apiVersion": "v1", "kind": "Secret", "type": "Opaque", "metadata": {"name": k["secret"].format(n=n), "namespace": ns},
+                  "stringData": {"msp-keystore-priv_sk": key, "msp-signcert.pem": cert}}
+        sh("kubectl", "--kubeconfig", kubeconfig, "create", "-f", "-", stdin=yaml.safe_dump(secret), secrets=secrets)
+    finally:
+        destroy(work)
+
+
+def admin(party, ns, kubeconfig, ca_url, work, src, dst, generation=""):
+    """PLAN S8 admin identity (see identity())."""
+    return identity("admin", party, ns, kubeconfig, ca_url, work, src, dst, generation)
+
+
 def destroy(work):
     """shred every file, remove the tree; the caller then proves it with `find <work>` (must print nothing / not exist)."""
+    if not os.path.exists(work):
+        return
     for d, _, names in os.walk(work):
         for x in names:
             subprocess.run(["shred", "-u", os.path.join(d, x)], check=True)
@@ -211,6 +276,8 @@ if __name__ == "__main__":
             sans.append(v) if k == "--extra-san" else opt.__setitem__(k, v)
         if cmd == "init":
             init(party, ns, opt["--kubeconfig"], opt["--work"])
+        elif cmd in KINDS:
+            identity(cmd, party, ns, opt["--kubeconfig"], opt["--ca-url"], opt["--work"], opt["--src"], opt["--dst"], opt.get("--generation", ""))
         elif cmd == "enroll":
             enroll(party, ns, opt["--kubeconfig"], opt["--ca-url"], opt["--work"], opt["--out"], sans, opt.get("--generation", ""))
         else:
