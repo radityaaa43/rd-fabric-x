@@ -3,6 +3,7 @@
 
 usage: enroll.py init   <party> rd-fabricx-<party> --kubeconfig K --work W
        enroll.py enroll <party> rd-fabricx-<party> --kubeconfig K --ca-url http://localhost:7054 --work W --out exchange/org<N>
+One org at a time (sequential): W under /dev/shm only (tmpfs, umask 077 set by the script); destroy W before the next org starts.
 init creates the admin password Secret (apply render.py's CA manifest after it). enroll runs `fabric-ca-client` (msp + tls profile)
 per role, writes Secrets `orderer-<role>-<N>-secret` with `kubectl create`, builds the public exchange tree, runs check_exchange,
 then shreds W. Private keys exist in W only between enroll and the Secret create: run it on the org's own host.
@@ -23,6 +24,14 @@ def check_target(party, ns):
     if party not in PARTY_N or ns != f"rd-fabricx-{party}":
         sys.exit(f"enroll.py: party {party!r} must be one of {', '.join(PARTY_N)} and the namespace rd-fabricx-<party>, got {ns!r}")
     return PARTY_N[party]
+
+
+def check_work(work):
+    """private keys only on tmpfs (/dev/shm), only readable by us: umask 077 is set here for everything that follows"""
+    if not os.path.isabs(work) or os.path.normpath(work) != work or not work.startswith("/dev/shm/"):
+        sys.exit(f"enroll.py: --work must be a normalized absolute path under /dev/shm/, got {work!r}")
+    os.umask(0o077)
+    return work
 
 
 def first(pattern):
@@ -78,6 +87,7 @@ def sh(*cmd, stdin=None, env=None):
 def init(party, ns, kubeconfig, work):
     """admin password -> work/admin.pass (600) and Secret fca-org<N>-admin; apply the CA manifest only after this."""
     n = check_target(party, ns)
+    work = check_work(work)
     os.makedirs(work, mode=0o700, exist_ok=True)
     p = f"{work}/admin.pass"
     fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
@@ -89,25 +99,28 @@ def init(party, ns, kubeconfig, work):
 def enroll(party, ns, kubeconfig, ca_url, work, out):
     """needs `kubectl --kubeconfig K -n NS port-forward svc/fca-org<N> 7054` running (party-admin Role: pods/portforward)."""
     n = check_target(party, ns)
-    pw = read(f"{work}/admin.pass").strip()
-    host_url = ca_url.replace("://", f"://admin:{pw}@")
-    adminmsp = f"{work}/admin-msp"
-    env = {**os.environ, "FABRIC_CA_CLIENT_HOME": f"{work}/client"}
-    sh("fabric-ca-client", "enroll", "-u", host_url, "-M", adminmsp, env=env)
-    hosts = {r: f"{r}-{n}.{ns}.svc.cluster.local" for r in ROLES}
-    for role in ROLES:
-        secret = os.urandom(12).hex()
-        sh("fabric-ca-client", "register", "-u", ca_url, "-M", adminmsp, "--id.name", f"{role}-{n}", "--id.secret", secret, "--id.type", "orderer", env=env)
-        role_url = ca_url.replace("://", f"://{role}-{n}:{secret}@")
-        sh("fabric-ca-client", "enroll", "-u", role_url, "-M", f"{work}/enrolled/{role}/msp", "--csr.hosts", hosts[role], env=env)
-        sh("fabric-ca-client", "enroll", "-u", role_url, "-M", f"{work}/enrolled/{role}/tls", "--enrollment.profile", "tls", "--csr.hosts", hosts[role], env=env)
-    secrets = build(f"{work}/enrolled", out, n, ns, hosts)
-    for s in secrets:   # create, never apply: party-admin may create/update/patch secrets but not get
-        sh("kubectl", "--kubeconfig", kubeconfig, "create", "-f", "-", stdin=yaml.safe_dump(s))
-    found = check_exchange.problems(out, n)
-    if found:
-        sys.exit("enroll.py: exchange tree is not clean:\n" + "\n".join(found))
-    destroy(work)
+    work = check_work(work)
+    try:
+        pw = read(f"{work}/admin.pass").strip()
+        host_url = ca_url.replace("://", f"://admin:{pw}@")
+        adminmsp = f"{work}/admin-msp"
+        env = {**os.environ, "FABRIC_CA_CLIENT_HOME": f"{work}/client"}
+        sh("fabric-ca-client", "enroll", "-u", host_url, "-M", adminmsp, env=env)
+        hosts = {r: f"{r}-{n}.{ns}.svc.cluster.local" for r in ROLES}
+        for role in ROLES:
+            secret = os.urandom(12).hex()
+            sh("fabric-ca-client", "register", "-u", ca_url, "-M", adminmsp, "--id.name", f"{role}-{n}", "--id.secret", secret, "--id.type", "orderer", env=env)
+            role_url = ca_url.replace("://", f"://{role}-{n}:{secret}@")
+            sh("fabric-ca-client", "enroll", "-u", role_url, "-M", f"{work}/enrolled/{role}/msp", "--csr.hosts", hosts[role], env=env)
+            sh("fabric-ca-client", "enroll", "-u", role_url, "-M", f"{work}/enrolled/{role}/tls", "--enrollment.profile", "tls", "--csr.hosts", hosts[role], env=env)
+        secrets = build(f"{work}/enrolled", out, n, ns, hosts)
+        for s in secrets:   # create, never apply: party-admin may create/update/patch secrets but not get
+            sh("kubectl", "--kubeconfig", kubeconfig, "create", "-f", "-", stdin=yaml.safe_dump(s))
+        found = check_exchange.problems(out, n)
+        if found:
+            sys.exit("enroll.py: exchange tree is not clean:\n" + "\n".join(found))
+    finally:  # keys never stay in /dev/shm, also on error
+        destroy(work)
 
 
 def destroy(work):

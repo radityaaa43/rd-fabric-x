@@ -57,7 +57,12 @@ The org sends the directory and tells `lead` the sha256 of `MANIFEST.sha256` on 
 ## 7. Scratch run that settled the gates (no cluster, throwaway keys)
 `armageddon` built from orderer@dd296e3 (Go 1.26.5 toolchain fetched by `go build`), run in the session scratchpad: `generate` for a 4-party template (hosts `*.rd-fabricx-<party>.svc.cluster.local`, mTLS) exit 0 -> per org 61 files; then `createBlock` on a copy without private keys exit 0 (Gate 2). `check_exchange.py` exit 0 on an exchange tree cut from that real output, and non-zero with a real `server.key` slipped in. The scratch keys were never used anywhere.
 
-## 8. Weak points to keep in view
-- One operator host running all four orgs sees every key between `fabric-ca-client enroll` and Secret create. The design intent is one run per org on that org's own host with its own party kubeconfig; running all four here is the same exposure as the central fallback for that window. Say which one was used in the window report.
-- The CA key and its registry sit on a PVC, not in a Secret: `party-admin` cannot read them, but a PVC snapshot or the cluster admin can.
-- `fca-org<N>` runs without TLS in-namespace (`--tls.enabled=false`; port-forward only). Enabling TLS is S13.
+## 8. Decided run rules (lead, 2026-11-11) and weak points
+- Window start: install `fabric-ca-client` on the operator host at a PINNED version (the server image is fabric-ca 1.5.22; use the same) and run a throwaway-identity enroll against the org's CA (register `probe-<N>`, enroll, delete the identity and the files). Any error: stop, report; rollback only on the user's word. Only then the real run.
+- Sequential per org: own party kubeconfig, `--work` under `/dev/shm` (enforced by `enroll.py`, umask 077 set there), Secrets created, then the work dir is shredded (`enroll.py` does it in a `finally`) BEFORE the next org starts. Proof per org: `ls /dev/shm/<work>` -> No such file.
+- Lead classification: ACCEPTED interim shortcut. One operator host holds each org's keys on tmpfs, transiently, between enroll and Secret create. The recorded decentralization gap is the per-bank operator host. This text goes into the GO request.
+- PVC per CA: qa PRE checks disk-attach capacity on the target nodes and the storage class (`alicloud-essd-wffc`); if there is no slot, stop before apply.
+- The four live Roles lack `pods/portforward`: updating them is GO line B-F0 (rollback = remove the rule).
+- The CA key and registry sit on a PVC, not in a Secret: `party-admin` cannot read them; the cluster admin and snapshots can.
+- `fca-org<N>` runs without TLS in-namespace (`--tls.enabled=false`; port-forward only). TLS is S13.
+- S10 builds the genesis with `createBlock` only: its block is not byte-identical to the one `generate` writes (cause unverified).

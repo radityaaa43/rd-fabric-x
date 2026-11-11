@@ -87,6 +87,29 @@ class Enroll(unittest.TestCase):
             blob = subprocess.run(["grep", "-r", "PRIVATE KEY", ex], capture_output=True, text=True).stdout
             self.assertEqual(blob, "")
 
+    def test_work_dir_must_be_tmpfs_and_private(self):
+        for bad in ("/home/ecs-user/w", "/tmp/w", "/dev/shmx/w", "relative/w", "/dev/shm/../tmp/w"):
+            with self.subTest(work=bad):
+                with self.assertRaises(SystemExit):
+                    enroll.check_work(bad)
+        self.assertEqual(enroll.check_work("/dev/shm/s9-bank-a"), "/dev/shm/s9-bank-a")
+        old = os.umask(0o022)
+        try:
+            enroll.check_work("/dev/shm/s9-bank-a")
+            cur = os.umask(old)
+            self.assertEqual(cur & 0o077, 0o077)      # umask 077 set by the guard
+        finally:
+            os.umask(old)
+
+    def test_destroy_leaves_nothing(self):
+        d = tempfile.mkdtemp(dir="/dev/shm")
+        os.makedirs(os.path.join(d, "a", "b"))
+        for f in ("x", "a/y", "a/b/z"):
+            with open(os.path.join(d, f), "w") as fh:
+                fh.write("PRIVATE KEY")
+        enroll.destroy(d)
+        self.assertFalse(os.path.exists(d))
+
     def test_wrong_namespace_or_party_refused(self):
         for args in (("bank-a", "rd-fabricx-bi"), ("bank-a", "fabricx"), ("bank-x", "rd-fabricx-bank-x")):
             with self.assertRaises(SystemExit):
