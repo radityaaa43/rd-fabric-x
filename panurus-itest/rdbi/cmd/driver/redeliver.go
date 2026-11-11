@@ -293,3 +293,17 @@ func reportOutcomes(o any) (map[string]string, error) {
 	}
 	return res, nil
 }
+
+// reportOutcome is BI's outcome for tx in the report view's answer. A tx absent from the answer was not delivered
+// (an empty tx, the "everything" call of `op: report`, has no single outcome and yields "").
+func reportOutcome(o any, tx string) (string, error) {
+	res, err := reportOutcomes(o)
+	if err != nil || tx == "" {
+		return "", err
+	}
+	out, ok := res[tx]
+	if !ok {
+		return "", fmt.Errorf("tx missing from BI reply")
+	}
+	return out, nil
+}

@@ -291,11 +291,11 @@ func deliver(tx string) string {
 	if err != nil {
 		return "not delivered: " + short(err)
 	}
-	res, err := reportOutcomes(o)
+	out, err := reportOutcome(o, tx)
 	if err != nil {
 		return "not delivered: " + err.Error()
 	}
-	return res[tx]
+	return out
 }
 
 // precheck asks the counterparty's gateway whether its party may give its leg. Any answer but 200, or no answer

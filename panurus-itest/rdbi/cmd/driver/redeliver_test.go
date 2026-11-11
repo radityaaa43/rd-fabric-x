@@ -437,3 +437,42 @@ func TestRunSurvivesOddReportAnswer(t *testing.T) {
 		t.Fatalf("due set = %d, want 1", pending.size())
 	}
 }
+
+// A tx absent from BI's answer is not a delivery: "not delivered: tx missing from BI reply", the tx stays due.
+type emptyReportNode struct{ fakeNode }
+
+func (o emptyReportNode) CallView(fid string, in []byte) (any, error) {
+	if fid == "report" {
+		return []byte(`{}`), nil
+	}
+	return o.fakeNode.CallView(fid, in)
+}
+
+func TestRunNotesTxMissingFromBIReply(t *testing.T) {
+	old := pending
+	pending = newRedeliverer(redeliverFuncs{}, false)
+	t.Cleanup(func() { pending = old })
+	calls, _ := setup(t, "bank2", 200, "[]", "")
+	clients["bank2"] = emptyReportNode{fakeNode{"bank2", calls}}
+	code, out := post(`{"op":"transfer","from":"bank2","to":"bank3","type":"RD","amount":"7"}`)
+	if code != 200 || !strings.Contains(out, "not delivered: tx missing from BI reply") {
+		t.Fatalf("got %d %s, want a not-delivered report naming the missing tx", code, out)
+	}
+	if pending.size() != 1 {
+		t.Fatalf("due set = %d, want 1", pending.size())
+	}
+}
+
+func TestReportOpTxMissingFromBIReply(t *testing.T) {
+	old := pending
+	pending = newRedeliverer(redeliverFuncs{}, false)
+	t.Cleanup(func() { pending = old })
+	setup(t, "bank2", 200, "[]", "") // the fake report view answers only tx1
+	code, out := post(`{"op":"report","txid":"zz"}`)
+	if code != 200 || !strings.Contains(out, "not delivered: tx missing from BI reply") {
+		t.Fatalf("got %d %s", code, out)
+	}
+	if pending.size() != 1 {
+		t.Fatalf("due set = %d, want 1: the missing tx must be due", pending.size())
+	}
+}
