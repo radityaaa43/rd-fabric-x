@@ -50,6 +50,11 @@ def main():
         c = ["kubectl", "--kubeconfig", a.kubeconfig, "-n", a.ns, "exec", target] + (["-c", container] if container else []) + ["--", "sh", "-c", *cmd]
         return subprocess.check_output(c, text=False, env={**os.environ, "KUBECTL_REMOTE_COMMAND_WEBSOCKETS": "false"})
 
+    # the token namespace table exists only after S14 (namespace create): say so instead of a psql error and a traceback
+    reg = ex(a.committer_db, f'PGPASSWORD=$POSTGRES_PASSWORD psql -U $POSTGRES_USER -d $POSTGRES_DB -h 127.0.0.1 -Atc "select to_regclass(\'ns_{tns}\')"').decode().strip()
+    if not reg:
+        print(f"reconcile: token namespace {tns} is not on the ledger yet (no table ns_{tns}): nothing to reconcile")
+        sys.exit(2)
     sql = f"select encode(key, 'escape') from ns_{tns}"
     out = ex(a.committer_db, f'PGPASSWORD=$POSTGRES_PASSWORD psql -U $POSTGRES_USER -d $POSTGRES_DB -h 127.0.0.1 -Atc "{sql}"').decode()
     ledger = ledger_txids(out)
