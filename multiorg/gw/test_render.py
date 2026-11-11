@@ -146,7 +146,8 @@ class GwRender(unittest.TestCase):
         for p, n in PARTIES.items():
             docs = build(self.root, p)
             op = yaml.safe_load(by(docs, "ConfigMap", f"fx-gw-{n}-opa")["data"]["opa.yaml"])
-            self.assertEqual(op["services"]["bundle-server"]["url"], f"http://bundle-server.rd-zeto-{p}.svc.cluster.local:8080")
+            self.assertEqual(op["services"]["bundle-server"]["url"], f"http://bundle-server.rd-zeto-{p}.svc.cluster.local")   # Service port 80, not the pod port 8080 (hangs: live S16 bank-b)
+            self.assertNotIn(":8080", op["services"]["bundle-server"]["url"])
             self.assertNotIn("sink", op["services"])
             self.assertNotIn("service", op["decision_logs"])
             self.assertEqual(op["decision_logs"]["console"], True)
