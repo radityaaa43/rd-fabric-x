@@ -236,7 +236,7 @@ class Net(Base):
         a = dict(image=IMG, tx_name="tx1")
         if kind == "submit":
             a.update(tx=self.tx)
-        a.update(cacert=self.ca)
+        a.update(cacert=self.ca, mspca=self.ca)
         a.update(kw)
         return list(yaml.safe_load_all(render.render_net(kind, party, **a)))
 
@@ -252,14 +252,14 @@ class Net(Base):
         self.assertEqual(src[0], {"secret": {"name": "orderer-admin-1-secret", "items": [{"key": "msp-keystore-priv_sk", "path": "msp/keystore/priv_sk"}, {"key": "msp-signcert.pem", "path": "msp/signcerts/cert.pem"}]}})
         self.assertEqual(src[1], {"secret": {"name": "committer-tls", "items": [{"key": "server.crt", "path": "tls/client.crt"}, {"key": "server.key", "path": "tls/client.key"}, {"key": "ca.crt", "path": "tls/ca.crt"}]}})
         self.assertEqual(src[2]["configMap"]["name"], "s14-submit-in-tx1")
-        self.assertEqual(sorted(i["path"] for i in src[2]["configMap"]["items"]), ["config.yaml", "tlsca.pem", "tx.json"])
+        self.assertEqual(sorted(i["path"] for i in src[2]["configMap"]["items"]), ["config.yaml", "msp/cacerts/ca.pem", "tlsca.pem", "tx.json"])   # live 21:06Z: fxconfig loads the MSP from /w/msp and needs cacerts/
 
     def test_readback_has_no_signing_key_and_no_tx(self):
         docs = self.net("readback")
         src, _ = self.sources(docs)
         self.assertEqual([s_.get("secret", {}).get("name") or s_["configMap"]["name"] for s_ in src], ["committer-tls", "s14-readback-in-tx1"])
         self.assertNotIn("orderer-admin", yaml.safe_dump(docs))
-        self.assertEqual(sorted(self.by(docs, "ConfigMap")["data"]), ["config.yaml", "tlsca.pem"])
+        self.assertEqual(sorted(self.by(docs, "ConfigMap")["data"]), ["config.yaml", "mspca.pem", "tlsca.pem"])
 
     def test_commands_are_exact_and_without_a_shell(self):
         c = lambda k: self.by(self.net(k), "Job")["spec"]["template"]["spec"]["containers"][0]
@@ -307,6 +307,9 @@ class Net(Base):
         open(self.ca, "w").write(CERT + "PRIVATE KEY")
         with self.assertRaises(SystemExit):
             self.net("submit")
+        open(self.ca, "w").write(CERT)
+        with self.assertRaises(SystemExit):   # the MSP CA is required (public cert), also for readback
+            self.net("submit", mspca=None)
 
 
 if __name__ == "__main__":
