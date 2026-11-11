@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/json"
@@ -89,6 +90,13 @@ func serve(args []string) {
 	c, err := peerClient()
 	must(err, "mTLS client")
 	party, serving, peer = args[0], true, c
+	every, err := redeliverInterval(os.Getenv(envRedeliver))
+	must(err, "redelivery interval")
+	pending = newRealRedeliverer(party != bi)
+	if every <= 0 {
+		pending.disable()
+	}
+	go pending.loop(context.Background(), every)
 	srv := &http.Server{Addr: args[1], Handler: http.HandlerFunc(handle), ReadHeaderTimeout: 10 * time.Second}
 	must(srv.ListenAndServe(), "listen "+args[1])
 }
@@ -244,7 +252,11 @@ func dispatch(req request) (any, error) {
 		call(party, "TxFinality", &views1.TxFinality{TxID: req.TxID, Timeout: 90 * time.Second})
 		return map[string]any{"txId": req.TxID, "final": true}, nil
 	case "report":
-		return map[string]any{"report": deliver(req.TxID)}, nil
+		out := deliver(req.TxID)
+		if req.TxID != "" {
+			pending.note(req.TxID, out)
+		}
+		return map[string]any{"report": out}, nil
 	case "usage":
 		since, err := time.Parse(time.RFC3339, req.Since)
 		if err != nil || req.Type == "" {
@@ -279,8 +291,10 @@ func deliver(tx string) string {
 	if err != nil {
 		return "not delivered: " + short(err)
 	}
-	res := map[string]string{}
-	jsonUnmarshal(o.([]byte), &res)
+	res, err := reportOutcomes(o)
+	if err != nil {
+		return "not delivered: " + err.Error()
+	}
 	return res[tx]
 }
 

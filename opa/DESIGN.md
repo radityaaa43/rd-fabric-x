@@ -142,12 +142,11 @@ with a lead go.
    replicas since L8 (2026-11-06) and is kept for rollback. Anyone who can scale it up or read Secrets
    (cluster-admin) has the old all-party path back. Decision after L9: delete the Secret, or keep it for operator use.
 
-Follow-up from L9 S6c (R2 shown 2026-11-06; report `.superpowers/sdd/2026-11-05-halaman-kebijakan/scenario-fabricx-S6c-report.md`):
-- With BI down, a bank transfer still commits with 3-of-4. The report to BI is "not delivered", and it is redelivered once BI is back (`op: report`).
-- However, it takes ~2m10s to submit and another ~2m10s for the report attempt, because both wait out a timeout to BI's endpoints. A Service with no endpoints drops the SYN instead of refusing it. Lensa's 120 s deadline therefore shows an error for a tx that commits.
-- Fix options, not applied:
-  1. A fabricx-specific, longer Lensa deadline, or reporting the run as pending.
-  2. A shorter endorsement/report timeout, or a different failover order, in the Panurus endorser-failover patch.
+Follow-up from L9 S6c (R2 shown 2026-11-06; report `.superpowers/sdd/2026-11-05-halaman-kebijakan/scenario-fabricx-S6c-report.md`), updated 2026-11-11 after the BI-down proof (`NOTES.md`, "BI-down proof"):
+- With BI down, a bank transfer still commits with 3-of-4. The report to BI is "not delivered". The driver loop in the fxapi container of fx-gw-N (`rdbi/cmd/driver/redeliver.go`) redelivers it within 60 s of BI returning: every tick it probes BI through fx-gw-1 (op `usage`, 3 s timeout) and, when that answers 200, sends each due transaction once through the `report` path. `RDBI_REDELIVER_INTERVAL` sets the tick (default 60s, 0 disables). `op: report` stays for manual use.
+- A transfer takes ~131 s to submit when BI is in its endorser set (OS connect timeout ~127 s, then failover) and ~131 s more for the report attempt: ~267 s in all. Deadlines in the chain: Envoy route 300 s (`scripts/k8s.py`) < Lensa gateway fetch 305 s < Lensa transaction deadline 340 s.
+- Documented limit: a second transfer from the same bank while the first one waits on BI queues behind it (one connection lock per node, fsc `multiplexed_provider.go:150-162`) and can take ~380 s, so Envoy answers 504 although the transaction commits; its report is then delivered by the loop. Lensa (fe change) is to hold the per-sender slot until the gateway answers to avoid this.
+- Rejected: a longer Envoy timeout (moves the cliff, does not remove it).
 
 ## 10. Footprint
 

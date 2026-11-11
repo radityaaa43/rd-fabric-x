@@ -96,6 +96,7 @@ func run(initiator string, others []string, submit func() any) map[string]any {
 	} else {
 		report += ": " + short(err)
 	}
+	pending.note(tx, report) // not delivered: the redelivery loop sends it once BI answers (redeliver.go)
 	lap("report")
 	return map[string]any{"txId": tx, "steps": steps, "report": report}
 }
