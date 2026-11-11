@@ -16,6 +16,7 @@ STUB = """#!/bin/sh
 echo "$@" >> "$STUB_LOG"
 echo "$KUBECTL_REMOTE_COMMAND_WEBSOCKETS" >> "$STUB_LOG.ws"
 case "$*" in
+  *to_regclass*) cat "$STUB_REGCLASS" 2>/dev/null || echo "ns_rd_dfabi_v2";;
   *psql*) cat "$STUB_LEDGER";;
   *"-wal"*) cat "$STUB_SQLITE-wal" 2>/dev/null || true;;
   *"cat /home/rdbi"*) cat "$STUB_SQLITE";;
@@ -60,7 +61,7 @@ class Flow(unittest.TestCase):
         os.chmod(f"{d}/bin/kubectl", 0o755)
         with open(f"{d}/ledger.txt", "w") as f:
             f.write(LEDGER)
-        self.env = {**os.environ, "PATH": f"{d}/bin:" + os.environ["PATH"], "STUB_LOG": f"{d}/log", "STUB_LEDGER": f"{d}/ledger.txt", "STUB_SQLITE": f"{d}/issuer.sqlite"}
+        self.env = {**os.environ, "PATH": f"{d}/bin:" + os.environ["PATH"], "STUB_LOG": f"{d}/log", "STUB_LEDGER": f"{d}/ledger.txt", "STUB_SQLITE": f"{d}/issuer.sqlite", "STUB_REGCLASS": f"{d}/regclass.txt"}
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -90,9 +91,11 @@ class Flow(unittest.TestCase):
             self.assertIn("--kubeconfig /k -n rd-fabricx-bi exec ", l)                  # one namespace, exec only
             self.assertNotRegex(l, r"\b(apply|create|delete|patch|replace|scale|label|annotate|port-forward)\b")
         sql = [l for l in log if "psql" in l]
-        self.assertEqual(len(sql), 1)
-        self.assertIn("select encode(key, 'escape') from ns_rd_dfabi_v2", sql[0])
-        self.assertNotRegex(sql[0].lower(), r"insert|update|delete|drop|alter")
+        self.assertEqual(len(sql), 2)   # an existence check (to_regclass) and the one SELECT
+        self.assertIn("select to_regclass('ns_rd_dfabi_v2')", sql[0])
+        self.assertIn("select encode(key, 'escape') from ns_rd_dfabi_v2", sql[1])
+        for l in sql:
+            self.assertNotRegex(l.lower(), r"insert|update|delete|drop|alter")
         self.assertNotIn("-n fabricx ", "\n".join(log))                                  # the old namespace is never named
 
     def test_targets_are_exactly_the_two_named_pods_no_deploy_no_list(self):
@@ -104,6 +107,17 @@ class Flow(unittest.TestCase):
         for l in log:
             self.assertNotIn("deploy/", l)
             self.assertNotRegex(l, r"\b(get|list|watch)\b")
+
+    def test_token_namespace_not_on_the_ledger_yet_is_a_message_not_a_traceback(self):
+        open(f"{self.tmp.name}/regclass.txt", "w").write("\n")   # to_regclass() returns NULL (empty line): the table ns_<token ns> does not exist yet
+        r = self.run_it()
+        self.assertEqual(r.returncode, 2)   # not 0: "nothing reconciled" must not look like a green check
+        self.assertIn("token namespace rd_dfabi_v2 is not on the ledger yet", r.stdout)
+        self.assertNotIn("Traceback", r.stdout + r.stderr)
+        log = open(f"{self.tmp.name}/log").read()
+        self.assertIn("to_regclass", log)
+        self.assertNotIn("select encode(key", log)   # the SELECT on the missing table is never sent
+        self.assertNotIn("cat /home/rdbi", log)      # and the issuer store is not copied either
 
     def test_spdy_is_forced_so_create_on_pods_exec_is_enough(self):
         make_store(f"{self.tmp.name}/issuer.sqlite", [(t, 2) for t in TX])
