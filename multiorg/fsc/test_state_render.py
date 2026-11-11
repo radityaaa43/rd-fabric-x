@@ -180,6 +180,17 @@ class RunScripts(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertTrue(os.path.exists(f"{self.S}/bank3/default.sqlite"), "the original was removed although the restore test failed")
 
+    def test_remove_backup_lists_the_files_before_and_after(self):
+        orig = open(f"{self.S}/bank3/default.sqlite", "rb").read()
+        self.run_("b-prime")
+        r = self.run_("remove-backup")
+        self.assertIn("bank3 files before: default.sqlite.bak-g1", r.stdout)
+        before = [l for l in r.stdout.splitlines() if l.startswith("bank3 files before:")][0]
+        after = [l for l in r.stdout.splitlines() if l.startswith("bank3 backup g1 removed")][0]
+        self.assertIn(".bak-g1", before)
+        self.assertNotIn(".bak-g1", after)
+        self.assertNotIn("SECRET", r.stdout + r.stderr)
+
     def test_remove_backup_removes_only_the_backup(self):
         self.run_("b-prime")
         self.run_("remove-backup")

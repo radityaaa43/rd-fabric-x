@@ -7,7 +7,7 @@ The FSC pod keeps one sqlite per node on its state PVC `rdbi-<pod>-state`: `<PVC
   b-prime        (B') per node, `set -eu`: counts of the original (via a copy) -> backup default.sqlite + -wal + -shm as *.bak-<GEN> (same PVC) with sha256 backup = original -> restore test (copy the backup to
                  .restore-test-<GEN>, counts must equal the first counts) -> remove the original three files. Any failure stops before the removal. PVC read-write.
   restore        rollback: copy the *.bak-<GEN> files back over default.sqlite* and verify sha256.
-  remove-backup  the separate later step: remove ONLY the *.bak-<GEN> files.
+  remove-backup  the separate later step: remove ONLY the *.bak-<GEN> files (prints the file names before and after, never a value).
                  The FSC pod keeps running: the state PVC is ReadWriteOnce and attached to its node, so this Job (only this mode) carries a required podAffinity to the FSC pod (same node);
                  without it the scheduler may pick another node and the Job dies with Multi-Attach (live 2026-11-12, bi).
 Pod: label rd/egress-locked=true, NetworkPolicy with policyTypes Ingress+Egress and NO rules (all traffic denied), no Secret volume, no ServiceAccount token, uid 10001, deadline 120 s, ttl 900 s.
@@ -84,6 +84,7 @@ done
 done
 '''
     return HEAD + f'''for n in {" ".join(nodes)}; do
+  echo "$n files before: $(ls "$S/$n" | tr '\\n' ' ')"
   rm -f "$S/$n/default.sqlite.bak-{gen}" "$S/$n/default.sqlite-wal.bak-{gen}" "$S/$n/default.sqlite-shm.bak-{gen}"
   echo "$n backup {gen} removed; files now: $(ls "$S/$n" | tr '\\n' ' ')"
 done
