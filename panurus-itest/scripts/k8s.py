@@ -342,12 +342,15 @@ def gateway(n):
                   "--config-file=/config/opa.yaml", f"--set=labels.gateway={name}",
                   "--set=services.bundle-server.url=http://bundle-server.paladin.svc",
                   "--set=services.sink.url=http://bundle-server.paladin.svc:8081",
+                  # the sink wants a bearer token (rd-besu opa/README.md, bundle-server hardening); OPA re-reads the file per request
+                  "--set=services.sink.credentials.bearer.token_path=/sink-token/token",
                   f"--set=bundles.bi.resource={n}/bi.tar.gz", f"--set=bundles.bank.resource={n}/bank.tar.gz",
                   f"--set=bundles.bank.signing.keyid={GW_KEY[n]}"],
          "readinessProbe": {"httpGet": {"path": "/health?plugins&bundles", "port": 8282}, "periodSeconds": 5},
          "livenessProbe": {"httpGet": {"path": "/health", "port": 8282}, "periodSeconds": 10},
          "resources": resources("64Mi", "256Mi"), "securityContext": {"runAsUser": 10001, **ro},
-         "volumeMounts": [{"name": "opa", "mountPath": "/config", "readOnly": True}]},
+         "volumeMounts": [{"name": "opa", "mountPath": "/config", "readOnly": True},
+                          {"name": "sink-token", "mountPath": "/sink-token", "readOnly": True}]},
         {"name": "fxapi", "image": IMAGE, "command": ["rdbi-driver", "serve", node, "127.0.0.1:8080"],
          "env": [{"name": "HOME", "value": os.path.dirname(T)}, {"name": "FXGW_TLS", "value": "/mtls"}],
          # fxapi listens on 127.0.0.1 only (behind Envoy), which a kubelet tcpSocket probe on the pod IP cannot reach
@@ -357,7 +360,10 @@ def gateway(n):
          "volumeMounts": [{"name": "rdbi", "mountPath": T}, {"name": "mtls", "mountPath": "/mtls", "readOnly": True}]}]
     volumes = [{"name": "files", "secret": {"secretName": f"{name}-files", "defaultMode": 0o400}}, {"name": "rdbi", "emptyDir": {}},
                {"name": "mtls", "secret": {"secretName": f"{name}-mtls", "defaultMode": 0o444}},  # envoy and fxapi run as 10001
-               {"name": "envoy", "configMap": {"name": f"{name}-envoy"}}, {"name": "opa", "configMap": {"name": "fx-gw-opa"}}]
+               {"name": "envoy", "configMap": {"name": f"{name}-envoy"}}, {"name": "opa", "configMap": {"name": "fx-gw-opa"}},
+               # copy of ns paladin's Secret bundle-sink-token (secrets do not cross namespaces). optional: a missing Secret only
+               # costs the decision logs and status posts (401 or no file), it must not keep the gateway pod from starting
+               {"name": "sink-token", "secret": {"secretName": "bundle-sink-token", "defaultMode": 0o444, "optional": True}}]
     dep = deployment(name, 1, "set -e; tar xzf /secret/rdbi.tgz -C /rdbi; chown -R 10001:10001 /rdbi", containers, volumes)
     dep["metadata"]["labels"] = dep["spec"]["template"]["metadata"]["labels"] = labels
     dep["spec"]["strategy"] = {"type": "RollingUpdate", "rollingUpdate": {"maxSurge": 0, "maxUnavailable": 1}}  # no 2nd pod

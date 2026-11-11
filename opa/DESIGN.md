@@ -99,6 +99,13 @@ buyer's own gateway:
   signed with `~/.opa-keys` (bi, bank-a/b/c). One publish therefore reaches bank-gw-N and fx-gw-N.
 - OPA config: reuse CM `bank-gw-opa-v2` content (copied into ns fabricx as `fx-gw-opa`) with
   `decision_logs`/`status` pointing at `bundle-server.paladin.svc:8081`. The gateway id is `fx-gw-N`.
+- Sink token (rd-besu PR #9, bundle-server hardening): the sink requires `Authorization: Bearer <token>` on `POST /logs` and `/status`.
+  `panurus-itest/scripts/k8s.py` mounts the Secret `bundle-sink-token` at `/sink-token` in the opa container
+  (volume `optional: true`: a missing Secret costs the decision logs and status posts, never the gateway pod) and sets
+  `--set=services.sink.credentials.bearer.token_path=/sink-token/token` (opa v1.21.1 docs/configuration.md, "Services > Bearer Token";
+  OPA re-reads the file per request). Secrets do not cross namespaces: the rollout copies `bundle-sink-token` from ns paladin
+  into ns fabricx (never in Git, never in a message). fx-gw pods carry `app.kubernetes.io/part-of: rdbi-gw` (`k8s.py` `gateway()`), the label
+  #9's NetworkPolicy `bundle-server-ingress` admits from ns fabricx.
 - The publish `waitFor` must wait for both bank-gw-N and fx-gw-N revisions (noto's publish code, noted to noto).
 - Revision format and `model=fabricx` docs come from noto's generalisation.
 

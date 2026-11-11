@@ -89,12 +89,15 @@ func run(initiator string, others []string, submit func() any) map[string]any {
 	}
 	lap("final")
 	report := "not delivered"
-	if o, err := tryCall(initiator, "report", &rep.Report{TxID: tx}); err == nil {
-		res := map[string]string{}
-		jsonUnmarshal(o.([]byte), &res)
-		report = res[tx]
-	} else {
+	o, err := tryCall(initiator, "report", &rep.Report{TxID: tx})
+	var out string
+	if err == nil {
+		out, err = reportOutcome(o, tx)
+	}
+	if err != nil {
 		report += ": " + short(err)
+	} else {
+		report = out
 	}
 	pending.note(tx, report) // not delivered: the redelivery loop sends it once BI answers (redeliver.go)
 	lap("report")
