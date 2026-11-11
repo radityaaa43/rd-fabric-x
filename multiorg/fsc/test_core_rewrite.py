@@ -132,6 +132,18 @@ class Rewrite(unittest.TestCase):
             self.assertEqual(man[f"{T}/own/{n}/fsc/admin.pem"]["kind"], "public")
             self.assertNotIn(f"{T}/public/fsc/admin.pem", man)
 
+    def test_gw_cert_option_points_the_view_api_client_cert_at_the_public_gw_cert(self):
+        c = core("bank2")
+        out, man = cr.per_org_core(c, "bank2", H, T, gw_cert="/h/gw-exchange/org2/gw/bank2-gw.pem")
+        self.assertEqual(out["fsc"]["client"]["certs"], [f"{T}/public/gw/bank2-gw.pem"])
+        self.assertEqual(man[f"{T}/public/gw/bank2-gw.pem"], {"src": "/h/gw-exchange/org2/gw/bank2-gw.pem", "kind": "public"})
+        self.assertNotIn(f"{T}/own/bank2/fsc/admin.pem", man)   # the admin cert is no longer referenced by this node
+        out2, _ = cr.per_org_core(core("bank2"), "bank2", H, T)
+        self.assertEqual(out2["fsc"]["client"]["certs"], [f"{T}/own/bank2/fsc/admin.pem"])   # default unchanged
+        a = copy.deepcopy(out); b = copy.deepcopy(out2)
+        a["fsc"]["client"]["certs"] = b["fsc"]["client"]["certs"] = None
+        self.assertEqual(a, b)   # nothing else in the core differs
+
     def test_own_committer_endpoints(self):
         for n in NODES:
             out, _ = self.run_node(n)

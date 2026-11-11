@@ -24,7 +24,7 @@ def port(addr):
     return int(addr.rsplit(":", 1)[-1].rsplit("/", 1)[-1])
 
 
-def per_org_core(core, node, home, pod_root):
+def per_org_core(core, node, home, pod_root, gw_cert=None):
     if node not in NODE_ORG:
         raise ValueError(f"unknown node {node!r}")
     manifest = {}
@@ -47,7 +47,9 @@ def per_org_core(core, node, home, pod_root):
         if m and m[1] == node:
             return put(f"{T}/own/{node}/fsc/{'tls.crt' if m[2] == 'server.crt' else 'tls-ca.crt'}", p, "public")
         if re.fullmatch(r"livegen/fsc/crypto/peerOrganizations/fsc\.example\.com/users/Admin@fsc\.example\.com/msp/signcerts/Admin@fsc\.example\.com-cert\.pem", rel):
-            return put(f"{T}/own/{node}/fsc/admin.pem", p, "public")   # the org's own <node>-admin cert (enroll_fsc.py), replaced by the fx-gw client cert in S16; never the central Admin
+            if gw_cert:   # S16/S14: the view API accepts the gateway's own client identity `<node>-gw` (enroll_gw.py), not the <node>-admin cert whose key was dropped
+                return put(f"{T}/public/gw/{node}-gw.pem", gw_cert, "public")
+            return put(f"{T}/own/{node}/fsc/admin.pem", p, "public")   # the org's own <node>-admin cert (enroll_fsc.py); never the central Admin
         m = re.fullmatch(r"ids/([A-Za-z0-9-]+)/msp", rel)
         if m:
             return put(f"{T}/own/{node}/ids/{m[1]}/msp", p, "secret") if m[1] in own_ids else put(f"{T}/public/ids/{m[1]}/msp", p, "public")
