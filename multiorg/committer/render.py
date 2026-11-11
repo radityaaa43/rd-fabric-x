@@ -2,7 +2,7 @@
 """Print one org's Fabric-X committer for its namespace (fabricx PLAN S12; stdout only, nothing is applied, no cluster).
 
 usage: render.py bi|bank-a|bank-b|bank-c [--image repo@sha256:HEX] [--pg-image repo@sha256:HEX] [--zone Z] [--storage-class SC] [--ips FILE] [--msp-id-format org{n}]
-bank-c is cluster 2: --zone and --storage-class are required (lead: ap-southeast-1a, fabricx-essd). Cluster 1 defaults: ap-southeast-5b, alicloud-essd-wffc.
+bank-c is cluster 2: --storage-class is required (fabricx-essd); --zone is optional, none = no zone pin (as multiorg/arma/render.py since 043f3bc). Cluster 1 defaults: ap-southeast-5b, alicloud-essd-wffc.
 Output (YAML documents, apply order): ConfigMaps committer-config-{verifier,vc,coordinator,sidecar,query} and committer-msp-config, NetworkPolicy committer-traffic,
 Services committer-{db,verifier,vc,coordinator,sidecar,query-service} (all ClusterIP), StatefulSet committer-db (Postgres, TLS), Deployments committer-{verifier,vc,coordinator},
 StatefulSet committer-sidecar, Deployment committer-query. No Secret: the names it references are listed in RUNBOOK-S12.md. See there for what is unverified.
@@ -85,11 +85,12 @@ def render(party, image=COMMITTER_IMAGE, pg_image=PG_IMAGE, zone=None, storage_c
     if not isinstance(msp_id_format, str) or "{n}" not in msp_id_format or not re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*", msp_id_format.replace("{n}", "1")):
         die(f"--msp-id-format {msp_id_format!r} must contain {{n}} and give an MSP name")
     cluster = "cluster2" if party == "bank-c" else "cluster1"
-    if party == "bank-c" and (zone is None or storage_class is None):
-        die("bank-c is cluster 2: --zone and --storage-class are both required (never guessed)")
-    zone = arma.DEFAULT_ZONE if zone is None else zone
+    if party == "bank-c" and storage_class is None:
+        die("bank-c is cluster 2: --storage-class is required (never guessed); --zone is optional (none = no zone pin)")
+    if zone is None and party != "bank-c":
+        zone = arma.DEFAULT_ZONE
     storage_class = arma.DEFAULT_SC if storage_class is None else storage_class
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", zone):
+    if zone is not None and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", zone):
         die(f"zone {zone!r} is not a zone name")
     if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", storage_class):
         die(f"storage class {storage_class!r} is not a name")
@@ -130,7 +131,7 @@ def render(party, image=COMMITTER_IMAGE, pg_image=PG_IMAGE, zone=None, storage_c
                      "spec": {"type": "ClusterIP", "selector": {"app.kubernetes.io/name": workload},
                               "ports": [{"name": port_name, "port": port, "targetPort": port_name, "protocol": "TCP"}]}})
 
-    place = {"nodeSelector": {"topology.kubernetes.io/zone": zone}}
+    place = {"nodeSelector": {"topology.kubernetes.io/zone": zone}} if zone else {}
     if cluster == "cluster1":
         place["affinity"] = {"nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [
             {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": list(arma.AVOID_NODES)}]}]}}}

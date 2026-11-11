@@ -36,7 +36,7 @@ class Base(unittest.TestCase):
     def kw(self, party, **over):
         kw = {}
         if party == "bank-c":
-            kw.update(zone="ap-southeast-1a", storage_class="fabricx-essd")
+            kw.update(storage_class="fabricx-essd")   # no zone pin on cluster 2 (as the arma render since 043f3bc)
         kw.update(over)
         return kw
 
@@ -390,22 +390,20 @@ class Placement(Base):
                     self.assertEqual(x["spec"]["storageClassName"], "alicloud-essd-wffc")
                 self.assertEqual({a["ip"] for a in spec.get("hostAliases", [])}, set(C1.values()) if n == "committer-sidecar" else set())
 
-    def test_bank_c_requires_zone_and_storage_class(self):
-        for over in ({}, {"zone": "ap-southeast-1a"}, {"storage_class": "fabricx-essd"}):
+    def test_bank_c_requires_storage_class_only(self):
+        for over in ({}, {"zone": "ap-southeast-1a"}):
             with self.assertRaises(SystemExit):
                 render.render("bank-c", **over)
         r = self.cli("bank-c")
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(r.stdout, "")
-        r = self.cli("bank-c", "--zone", "ap-southeast-1a")
-        self.assertNotEqual(r.returncode, 0)
-        r = self.cli("bank-c", "--zone", "ap-southeast-1a", "--storage-class", "fabricx-essd")
+        r = self.cli("bank-c", "--storage-class", "fabricx-essd")
         self.assertEqual(r.returncode, 0, r.stderr)
 
     def test_bank_c_cluster2_values(self):
         for n, w in self.workloads("bank-c").items():
             spec = w["spec"]["template"]["spec"]
-            self.assertEqual(spec["nodeSelector"], {"topology.kubernetes.io/zone": "ap-southeast-1a"})
+            self.assertNotIn("nodeSelector", spec)                               # no zone pin: zone 1a had no room, the class binds on first consumer
             self.assertNotIn("affinity", spec)                                   # the cluster-1 node names do not exist there
             for x in w["spec"].get("volumeClaimTemplates", []):
                 self.assertEqual(x["spec"]["storageClassName"], "fabricx-essd")

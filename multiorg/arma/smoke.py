@@ -51,7 +51,7 @@ def layout(sts, docs, secrets, base):
     vols = {v["name"]: v for v in spec["volumes"]}
     for m in c["volumeMounts"]:
         dest = base + m["mountPath"]
-        if m["name"] == "data":
+        if m["name"] not in vols or "secret" not in vols[m["name"]] and "configMap" not in vols[m["name"]]:   # claim templates / emptyDir: a plain directory
             os.makedirs(dest, exist_ok=True)
             continue
         v = vols[m["name"]]
@@ -64,7 +64,7 @@ def layout(sts, docs, secrets, base):
         with open(dest, "wb") as f:
             f.write(src[key])
     os.makedirs(base + "/data", exist_ok=True)
-    cfg = base + "/config/node_config.yaml"
+    cfg = base + next(x.split("=", 1)[1] for x in c["args"] if x.startswith("--config="))   # the file the container is told to load
     text = open(cfg).read().replace("/config/", base + "/config/").replace("/data/", base + "/data/")
     open(cfg, "w").write(text)
     return [a.replace("/config/", base + "/config/") for a in c["args"]]
