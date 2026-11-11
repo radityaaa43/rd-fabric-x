@@ -30,10 +30,12 @@ for n in (1,2,3,4):
     for role, port in PORTS.items():
         host = f"{role}-{n}.arma.rd"
         d = f"{t}/orderers/party{n}/{role}"
-        os.makedirs(f"{d}/tls"); leaf(f"tlsca{n}", host, "orderer", f"{d}/tls/server.crt", san=host)
+        os.makedirs(f"{d}/tls"); leaf(f"tlsca{n}", host, "orderer", f"{d}/tls/server.crt", f"{root}/keys/org{n}-{role}-tls.key", san=host)   # key kept for arma/smoke.py
         w(f"{d}/tls/ca.crt", rd(f"{root}/keys/tlsca{n}.pem"))
         if role in ("batcher1", "consenter"):
-            os.makedirs(f"{d}/msp/signcerts"); leaf(f"ca{n}", f"{role}-{n}", "orderer", f"{d}/msp/signcerts/{role}-cert.pem")
+            os.makedirs(f"{d}/msp/signcerts"); leaf(f"ca{n}", f"{role}-{n}", "orderer", f"{d}/msp/signcerts/{role}-cert.pem", f"{root}/keys/org{n}-{role}-msp.key")
+        else:   # router/assembler msp cert is not public (it lives only in the node Secret); kept in keys/ for arma/smoke.py
+            leaf(f"ca{n}", f"{role}-{n}", "orderer", f"{root}/keys/org{n}-{role}-msp.pem", f"{root}/keys/org{n}-{role}-msp.key")
         ep[role] = {"Host": host, "Port": port}
     w(f"{t}/endpoints.yaml", yaml.safe_dump(ep))
     L = sorted(f"{hashlib.sha256(open(os.path.join(dd,x),'rb').read()).hexdigest()}  {os.path.relpath(os.path.join(dd,x),t)}\n" for dd,_,names in os.walk(t) for x in names if x != "MANIFEST.sha256")
