@@ -37,7 +37,7 @@ IPS = {"cluster1": {1: "10.200.55.11", 2: "10.200.27.215", 3: "10.200.63.143", 4
 CLB_HEALTH = "100.64.0.0/10"   # opt-in element of allow-arma-peers, S10b rule: only AFTER the CLB annotation/listener ACL read-back (backend-type eni health checks come from here)
 PEER_EGRESS = {"cluster1": "47.237.84.150/32", "cluster2": "8.215.62.92/32"}
 # [unverified] first-guess sizes, to be settled by the first run
-RESOURCES = {"requests": {"cpu": "50m", "memory": "128Mi", "ephemeral-storage": "64Mi"},
+RESOURCES = {"requests": {"cpu": "30m", "memory": "64Mi", "ephemeral-storage": "64Mi"},   # resized 2026-11-12 (GO resize), limits unchanged
              "limits": {"cpu": "1", "memory": "512Mi", "ephemeral-storage": "512Mi"}}
 
 yaml.add_representer(str, lambda d, s: d.represent_scalar("tag:yaml.org,2002:str", s, style="|" if "\n" in s else None), Dumper=yaml.SafeDumper)
