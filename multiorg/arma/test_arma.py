@@ -15,6 +15,8 @@ import test_check_exchange as tce
 PARTIES = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
 ROLES = ("router", "batcher1", "consenter", "assembler")
 OBJ = {"router": "router", "batcher1": "batcher", "consenter": "consenter", "assembler": "assembler"}
+# the arma CLI commands (orderer@dd296e3 node/server/arma.go:30-58): the consenter's command is `consensus`, not its role name
+CMD = {"router": "router", "batcher1": "batcher", "consenter": "consensus", "assembler": "assembler"}
 DIGEST = "docker.io/hyperledger/fabric-x-orderer@sha256:052ae8e16571d3d4de2e1a0c4e9ed0d979d782d3539d3c8fb1f7f66fe560e265"
 GENESIS = b"FAKE GENESIS BLOCK\n" * 50
 GEN_SHA = hashlib.sha256(GENESIS).hexdigest()
@@ -41,6 +43,7 @@ def make_exchange(root):
         tce.good_tree(d, n)
         tce.write(d, "msp/cacerts/ca.pem", cert(f"CA{n}"))
         tce.write(d, "msp/tlscacerts/tlsca.pem", cert(f"TLSCA{n}"))
+        tce.write(d, f"msp/admincerts/admin-{n}-cert.pem", cert(f"ADMIN{n}"))
         tce.write(d, "endpoints.yaml", yaml.safe_dump({r: {"Host": f"{r}-{n}.arma.rd", "Port": enroll.PORT_PLAN[r]} for r in ROLES}))
         tce.manifest(d)
 
@@ -122,7 +125,7 @@ class Objects(Base):
                     c = s["spec"]["template"]["spec"]["containers"][0]
                     self.assertEqual(c["image"], DIGEST)
                     self.assertNotIn("command", c)                                  # the image entrypoint
-                    self.assertEqual(c["args"], [OBJ[r], "--config=/config/node_config.yaml"])
+                    self.assertEqual(c["args"], [CMD[r], "--config=/config/node_config.yaml"])
                     v = s["spec"]["volumeClaimTemplates"]
                     self.assertEqual(len(v), 1)
                     self.assertEqual(v[0]["metadata"]["name"], "data")
@@ -314,8 +317,9 @@ class PublicAndGenesis(Base):
     def test_public_configmap(self):
         for p, n in PARTIES.items():
             d = self.cm(p, f"arma-public-{n}")["data"]
-            self.assertEqual(sorted(d), ["msp-cacert.pem", "tls-ca-bundle.crt"])
+            self.assertEqual(sorted(d), ["msp-admincert.pem", "msp-cacert.pem", "tls-ca-bundle.crt"])
             self.assertEqual(d["msp-cacert.pem"], cert(f"CA{n}"))                     # this org only
+            self.assertEqual(d["msp-admincert.pem"], cert(f"ADMIN{n}"))               # this org's admin cert only (public)
             self.assertEqual(d["tls-ca-bundle.crt"], "".join(cert(f"TLSCA{m}") for m in (1, 2, 3, 4)))   # all four orgs
 
     def test_genesis_configmap(self):
@@ -483,10 +487,22 @@ class Hardening(Base):
                     self.assertEqual(vol[mounts["/config/node_config.yaml"]["name"]]["configMap"]["name"], f"arma-config-{OBJ[r]}-{n}")
                     self.assertEqual(vol[mounts["/config/tls/ca.crt"]["name"]]["configMap"]["name"], f"arma-public-{n}")
                     self.assertEqual(vol[mounts["/config/msp/cacerts/ca.pem"]["name"]]["configMap"]["name"], f"arma-public-{n}")
+                    # the node's local MSP needs an admin (fabric-x-common msp/mspimplsetup.go:211: panic without admincerts or NodeOU admin class)
+                    self.assertEqual(vol[mounts["/config/msp/admincerts/admin.pem"]["name"]]["configMap"]["name"], f"arma-public-{n}")
+                    self.assertEqual(mounts["/config/msp/admincerts/admin.pem"]["subPath"], "msp-admincert.pem")
                     pub = vol[mounts["/config/tls/ca.crt"]["name"]]["configMap"]["items"]
                     self.assertIn({"key": "tls-ca-bundle.crt", "path": mounts["/config/tls/ca.crt"]["subPath"]}, pub)
                     # every mount has a volume, every volume is mounted
                     self.assertEqual({m["name"] for m in c["volumeMounts"]} - {"data"}, set(vol))
+
+
+class ExchangeNeedsAdmin(Base):
+    def test_tree_without_admincerts_refused(self):
+        import shutil
+        shutil.rmtree(os.path.join(self.ex, "org2", "msp", "admincerts"))
+        tce.manifest(os.path.join(self.ex, "org2"))
+        with self.assertRaises(SystemExit):
+            render.render("bi", **self.kw("bi"))
 
 
 class NetworkPolicyTests(Base):

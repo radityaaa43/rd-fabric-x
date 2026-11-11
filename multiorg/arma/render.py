@@ -24,7 +24,9 @@ AVOID_NODES = ["member-16033-node", "member-16034-node"]            # as panurus
 # the block goes into a ConfigMap as base64 binaryData (x 4/3) and the whole object must stay under 1 MiB: 700 KiB raw is ~934 KiB encoded
 MAX_GENESIS = 700 * 1024
 UID = 10001
-ID_ARG = {"router": "router", "batcher1": "batcher", "consenter": "consenter", "assembler": "assembler"}   # args the old StatefulSets used; = SECRET_ROLE
+ID_ARG = {"router": "router", "batcher1": "batcher", "consenter": "consenter", "assembler": "assembler"}   # object-name part of each role; = SECRET_ROLE
+# the arma CLI command of each role (orderer@dd296e3 node/server/arma.go:30-58): the consenter runs `consensus`
+CLI_CMD = {"router": "router", "batcher1": "batcher", "consenter": "consensus", "assembler": "assembler"}
 HOST = "{role}-{n}.arma.rd"   # genesis Host of every role (decision A: one config block with stable names; each pod resolves them with hostAliases)
 
 # Name -> address per pod cluster (decision A). Cluster 1 pods reach parties 1-3 through the ClusterIP of Service lb-<N> and party 4 through the public
@@ -77,7 +79,7 @@ def read_exchange(exchange, n):
         d = f"{exchange}/org{m}"
         if not os.path.isdir(d):
             die(f"{d} is missing: --exchange needs org1..org4")
-        found = check_exchange.problems(d, m)
+        found = check_exchange.problems(d, m, require_admin=True)
         if found:
             die(f"org{m} exchange tree is not clean: {'; '.join(found[:5])}")
         ep = yaml.safe_load(open(f"{d}/endpoints.yaml"))
@@ -89,7 +91,7 @@ def read_exchange(exchange, n):
 
     def pems(pattern):
         return "".join(t if t.endswith("\n") else t + "\n" for p in sorted(glob.glob(pattern)) for t in [open(p).read()])
-    return pems(f"{exchange}/org*/msp/tlscacerts/*.pem"), pems(f"{exchange}/org{n}/msp/cacerts/*.pem")
+    return pems(f"{exchange}/org*/msp/tlscacerts/*.pem"), pems(f"{exchange}/org{n}/msp/cacerts/*.pem"), pems(f"{exchange}/org{n}/msp/admincerts/*.pem")
 
 
 def read_genesis(path, sha):
@@ -153,7 +155,7 @@ def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zo
         die(f"storage class {storage_class!r} is not a name")
     table = load_ips(ips) if ips else IPS   # the built-in table is checked by test_arma
     n, ns = PARTY_N[party], f"rd-fabricx-{party}"
-    tls_bundle, msp_ca = read_exchange(exchange, n)
+    tls_bundle, msp_ca, admin_cert = read_exchange(exchange, n)
     gen = read_genesis(genesis, genesis_sha256)
     msp_id = msp_id_format.replace("{n}", str(n))
 
@@ -161,7 +163,7 @@ def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zo
     meta = lambda name, extra=None: {"name": name, "namespace": ns, "labels": {**base, **(extra or {})}}
     docs = [
         {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta("genesis-block"), "binaryData": {"genesis.block": base64.b64encode(gen).decode()}},
-        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(f"arma-public-{n}"), "data": {"tls-ca-bundle.crt": tls_bundle, "msp-cacert.pem": msp_ca}},
+        {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(f"arma-public-{n}"), "data": {"tls-ca-bundle.crt": tls_bundle, "msp-cacert.pem": msp_ca, "msp-admincert.pem": admin_cert}},
     ]
     for i, role in enumerate(ROLES):
         with open(f"{HERE}/templates/{ID_ARG[role]}-1.yaml") as f:
@@ -190,10 +192,11 @@ def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zo
         item = lambda k: {"key": k, "path": k}
         mounts = [mount("secret", mp, k) for k, mp in secret_keys.items()] + [
             mount("public", "/config/tls/ca.crt", "tls-ca-bundle.crt"), mount("public", "/config/msp/cacerts/ca.pem", "msp-cacert.pem"),
+            mount("public", "/config/msp/admincerts/admin.pem", "msp-admincert.pem"),
             mount("genesis", "/config/genesis.block", "genesis.block"), mount("config", "/config/node_config.yaml", "node_config.yaml"),
             {"name": "data", "mountPath": "/data"}]
         volumes = [{"name": "secret", "secret": {"secretName": f"orderer-{SECRET_ROLE[role]}-{n}-secret", "defaultMode": 0o400, "items": [item(k) for k in secret_keys]}},
-                   {"name": "public", "configMap": {"name": f"arma-public-{n}", "items": [item("tls-ca-bundle.crt"), item("msp-cacert.pem")]}},
+                   {"name": "public", "configMap": {"name": f"arma-public-{n}", "items": [item("tls-ca-bundle.crt"), item("msp-cacert.pem"), item("msp-admincert.pem")]}},
                    {"name": "genesis", "configMap": {"name": "genesis-block", "items": [item("genesis.block")]}},
                    {"name": "config", "configMap": {"name": f"arma-config-{obj}-{n}", "items": [{"key": "node-config.yaml", "path": "node_config.yaml"}]}}]
         docs.append({
@@ -203,7 +206,7 @@ def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zo
                          "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "seccompProfile": {"type": "RuntimeDefault"}, "fsGroup": UID},
                          "nodeSelector": {"topology.kubernetes.io/zone": zone}, "affinity": affinity, "hostAliases": aliases,
                          "containers": [{
-                             "name": "orderer", "image": image, "args": [obj, "--config=/config/node_config.yaml"],
+                             "name": "orderer", "image": image, "args": [CLI_CMD[role], "--config=/config/node_config.yaml"],
                              # S11 pod contract with lb-<N>: one NAMED port per role pod (the Service targetPort), plus ops on its own number
                              "ports": [{"name": role, "containerPort": PORT_PLAN[role]}, {"name": "ops", "containerPort": 7060 + i}],
                              "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}},
