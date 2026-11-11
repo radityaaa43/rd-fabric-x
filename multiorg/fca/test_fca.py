@@ -16,7 +16,7 @@ DIGEST = "ghcr.io/hyperledger/fabric-ca@sha256:87c36f0b655838e2c3b00379cafc6efb3
 
 
 def docs(party):
-    return list(yaml.safe_load_all(render.render(party, zone="test-zone" if party == "bank-c" else None)))
+    return list(yaml.safe_load_all(render.render(party, zone="test-zone" if party == "bank-c" else None, storage_class="test-sc" if party == "bank-c" else None)))
 
 
 class Manifests(unittest.TestCase):
@@ -50,15 +50,35 @@ class Manifests(unittest.TestCase):
         for p in ("bi", "bank-a", "bank-b"):
             self.assertEqual(sel(p), {"topology.kubernetes.io/zone": "ap-southeast-5b"})        # default
             self.assertEqual(sel(p, zone="ap-southeast-5a"), {"topology.kubernetes.io/zone": "ap-southeast-5a"})
-        self.assertEqual(sel("bank-c", zone="ap-southeast-1b"), {"topology.kubernetes.io/zone": "ap-southeast-1b"})
+        self.assertEqual(sel("bank-c", zone="ap-southeast-1b", storage_class="sc"), {"topology.kubernetes.io/zone": "ap-southeast-1b"})
         with self.assertRaises(SystemExit):
             render.render("bank-c")                      # cluster 2: the zone comes from the PRE, never guessed
-        r = subprocess.run([sys.executable, os.path.join(HERE, "render.py"), "bank-c", "--zone", "ap-southeast-1b"], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "render.py"), "bank-c", "--zone", "ap-southeast-1b", "--storage-class", "sc"], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertIn("ap-southeast-1b", r.stdout)
         for bad in ("", "a b", "x:y"):
             with self.assertRaises(SystemExit):
                 render.render("bank-a", zone=bad)
+
+    def test_storage_class(self):
+        # cluster 1 has alicloud-essd-wffc; cluster 2 does not (it has alicloud-essd Immediate, fabricx-essd WaitForFirstConsumer Retain)
+        sc = lambda p, **kw: next(x for x in yaml.safe_load_all(render.render(p, **kw)) if x["kind"] == "PersistentVolumeClaim")["spec"]["storageClassName"]
+        for p in ("bi", "bank-a", "bank-b"):
+            self.assertEqual(sc(p), "alicloud-essd-wffc")                                        # default
+            self.assertEqual(sc(p, storage_class="other-sc"), "other-sc")
+        self.assertEqual(sc("bank-c", zone="ap-southeast-1a", storage_class="fabricx-essd"), "fabricx-essd")
+        with self.assertRaises(SystemExit):
+            render.render("bank-c", zone="ap-southeast-1a")      # cluster 2: refused without --storage-class, never guessed
+        r = subprocess.run([sys.executable, os.path.join(HERE, "render.py"), "bank-c", "--zone", "ap-southeast-1a", "--storage-class", "fabricx-essd"],
+                           capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("storageClassName: fabricx-essd", r.stdout)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "render.py"), "bank-c", "--zone", "ap-southeast-1a"], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, "")
+        for bad in ("", "a b", "x/y"):
+            with self.assertRaises(SystemExit):
+                render.render("bank-a", storage_class=bad)
 
     def test_no_secret_material_in_manifest(self):
         out = render.render("bank-a")
@@ -69,7 +89,7 @@ class Manifests(unittest.TestCase):
         self.assertTrue(any("valueFrom" in e and e["valueFrom"]["secretKeyRef"]["name"] == "fca-org2-admin" for e in env))
 
     def test_cluster2_label_and_refusals(self):
-        self.assertEqual(next(x for x in yaml.safe_load_all(render.render("bank-c", zone="z")) if x["kind"] == "Deployment")["metadata"]["namespace"], "rd-fabricx-bank-c")
+        self.assertEqual(next(x for x in yaml.safe_load_all(render.render("bank-c", zone="z", storage_class="sc")) if x["kind"] == "Deployment")["metadata"]["namespace"], "rd-fabricx-bank-c")
         for bad in ("bank-d", "fabricx", ""):
             with self.assertRaises(SystemExit):
                 render.render(bad)
