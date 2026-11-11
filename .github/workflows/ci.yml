@@ -57,5 +57,11 @@ jobs:
           echo "7f52ab98481ac0e4bfcf5b5aabfb403fa692ee100ae3b2ca3bf3f2152851573d  /tmp/ca.tgz" | sha256sum -c -
           tar xzf /tmp/ca.tgz -C /tmp bin/fabric-ca-client
           sudo install /tmp/bin/fabric-ca-client /usr/local/bin/fabric-ca-client
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: multiorg/fsc/reenroll/go.mod
+      - name: fsc-reenroll helper (Go)
+        working-directory: multiorg/fsc/reenroll
+        run: go vet ./... && go test ./...
       - name: multiorg/fsc incl. the REAL fabric-ca tests (missing docker/client fails, no skip)
         run: python3 -m pip install pyyaml==6.0.1 && REQUIRE_REAL_CA=1 python3 -m unittest discover -s multiorg/fsc
