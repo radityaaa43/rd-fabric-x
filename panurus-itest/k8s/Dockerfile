@@ -1,6 +1,6 @@
 # rdbi-node (FSC/Panurus node) and rdbi-driver, built by `make live-build`; context is $(RDBI_HOME)/bin.
 # The binaries need glibc >= 2.34 (bookworm has 2.36). Configs and keys are mounted at $HOME/.fabricx-token.
-FROM debian:bookworm-slim
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 RUN useradd -u 10001 -m -d /home/rdbi rdbi
 COPY rdbi-node rdbi-driver /usr/local/bin/
 USER 10001
