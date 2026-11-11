@@ -79,30 +79,62 @@ class Scan(unittest.TestCase):
 
 
 class Allow(unittest.TestCase):
-    """the one known benign hit of the pinned Debian base (libgnutls30 embeds a PKCS8 self-test key): allowed by path AND file sha256 only"""
+    """the one known benign hit of the pinned Debian base (libgnutls30 embeds a PKCS8 self-test key): allowed by path AND file sha256, and only under the pinned base (Dockerfile FROM must equal the `base` line)"""
+    BASE = "debian:bookworm-slim@sha256:" + "ab" * 32
+
     def setUp(self):
         self.d = tempfile.TemporaryDirectory()
         self.p = os.path.join(self.d.name, "image.tar")
         self.lib = b"ELF" + KEY + b"tail"
         self.allow = os.path.join(self.d.name, "allow.txt")
+        self.dockerfile = os.path.join(self.d.name, "Dockerfile")
+        self.from_dockerfile(self.BASE)
 
     def tearDown(self):
         self.d.cleanup()
 
-    def allow_line(self, path, data):
-        with open(self.allow, "w") as f:
-            f.write("# comment\n" + f"{path} {hashlib.sha256(data).hexdigest()}\n")
+    def from_dockerfile(self, ref):
+        with open(self.dockerfile, "w") as f:
+            f.write(f"# comment\nFROM {ref}\nRUN true\n")
 
-    def run_scan(self):
-        return subprocess.run([sys.executable, "-I", os.path.join(HERE, "scan_image_keys.py"), self.p, "--allow", self.allow], capture_output=True, text=True)
+    def allow_line(self, path, data, base=BASE):
+        with open(self.allow, "w") as f:
+            f.write("# comment\n" + (f"base {base}\n" if base else "") + f"{path} {hashlib.sha256(data).hexdigest()}\n")
+
+    def run_scan(self, dockerfile=True):
+        a = [sys.executable, "-I", os.path.join(HERE, "scan_image_keys.py"), self.p, "--allow", self.allow]
+        if dockerfile:
+            a += ["--dockerfile", self.dockerfile]
+        return subprocess.run(a, capture_output=True, text=True)
 
     def test_listed_path_and_hash_is_allowed_and_reported(self):
         image_tar(self.p, [{"usr/lib/libgnutls.so": self.lib}, {"usr/local/bin/x": b"clean"}])
         self.allow_line("usr/lib/libgnutls.so", self.lib)
         r = self.run_scan()
-        self.assertEqual(r.returncode, 0, r.stdout)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
         self.assertIn("allowed (base image): usr/lib/libgnutls.so", r.stdout)
         self.assertIn("0 private key blocks outside the allow-list", r.stdout)
+
+    def test_changed_base_digest_in_the_dockerfile_fails_closed(self):
+        image_tar(self.p, [{"usr/lib/libgnutls.so": self.lib}])
+        self.allow_line("usr/lib/libgnutls.so", self.lib)
+        self.from_dockerfile("debian:bookworm-slim@sha256:" + "cd" * 32)   # a base bump with the allow file still present
+        r = self.run_scan()
+        self.assertNotEqual(r.returncode, 0)
+        self.assertNotIn("allowed (base image)", r.stdout)
+
+    def test_a_tag_instead_of_a_digest_fails_closed(self):
+        image_tar(self.p, [{"a": b"x"}])
+        self.allow_line("usr/lib/libgnutls.so", self.lib)
+        self.from_dockerfile("debian:bookworm-slim")
+        self.assertNotEqual(self.run_scan().returncode, 0)
+
+    def test_allow_file_without_base_line_or_without_dockerfile_fails_closed(self):
+        image_tar(self.p, [{"a": b"x"}])
+        self.allow_line("usr/lib/libgnutls.so", self.lib, base=None)
+        self.assertNotEqual(self.run_scan().returncode, 0)
+        self.allow_line("usr/lib/libgnutls.so", self.lib)
+        self.assertNotEqual(self.run_scan(dockerfile=False).returncode, 0)
 
     def test_same_path_other_content_fails(self):
         image_tar(self.p, [{"usr/lib/libgnutls.so": self.lib + b"changed"}])
@@ -124,22 +156,34 @@ class Allow(unittest.TestCase):
     def test_malformed_allow_file_fails_closed(self):
         image_tar(self.p, [{"a": b"x"}])
         with open(self.allow, "w") as f:
-            f.write("only-one-field\n")
+            f.write(f"base {self.BASE}\nonly-one-field\n")
         self.assertEqual(self.run_scan().returncode, 2)
 
 
 class PatchAllowList(unittest.TestCase):
-    def test_workflow_scan_step_cannot_pass_on_a_failed_scan(self):
-        # the first run printed "1 private key blocks" and the step still passed: `cmd | tee` has the exit status of tee unless pipefail is on
+    def test_workflow_every_run_step_has_pipefail(self):
+        # the first run printed "1 private key blocks" and the step still passed: `cmd | tee` has the exit status of tee unless pipefail is on.
+        # Workflow-level `defaults: run: shell: bash` makes GitHub run EVERY run step as `bash -eo pipefail`; no step may override it.
         import yaml
         wf = yaml.safe_load(open(os.path.join(os.path.dirname(os.path.dirname(HERE)), ".github", "workflows", "rdbi-image.yml")))
-        st = [s for s in wf["jobs"]["image"]["steps"] if s.get("name", "").startswith("Scan the image layers")][0]
-        self.assertEqual(st.get("shell"), "bash")   # GitHub runs `bash -eo pipefail` for an explicit bash shell
-        self.assertIn("--allow panurus-itest/k8s/scan-allow.txt", st["run"])
+        self.assertEqual(wf["defaults"], {"run": {"shell": "bash"}})
+        runs = [s for s in wf["jobs"]["image"]["steps"] if "run" in s]
+        self.assertGreaterEqual(len(runs), 6)
+        for s in runs:
+            self.assertIn(s.get("shell", "bash"), ("bash",), s.get("name"))
+        self.assertNotIn("defaults", wf["jobs"]["image"])   # a job-level default would override the workflow one
+        scan = [s for s in runs if s.get("name", "").startswith("Scan the image layers")][0]["run"]
+        self.assertIn("--allow panurus-itest/k8s/scan-allow.txt", scan)
+        self.assertIn("--dockerfile panurus-itest/k8s/Dockerfile", scan)
 
     def test_scan_allow_list_is_one_pinned_base_file(self):
         lines = [l.split() for l in open(os.path.join(os.path.dirname(HERE), "k8s", "scan-allow.txt")) if l.strip() and not l.startswith("#")]
-        self.assertEqual(lines, [["usr/lib/x86_64-linux-gnu/libgnutls.so.30.34.3", "779b25d20249988bea2c1aa6bbeb218f5ae7ea8a9d30ce4f54ea37372965cc4b"]])
+        base = [l for l in lines if l[0] == "base"]
+        files = [l for l in lines if l[0] != "base"]
+        self.assertEqual(files, [["usr/lib/x86_64-linux-gnu/libgnutls.so.30.34.3", "779b25d20249988bea2c1aa6bbeb218f5ae7ea8a9d30ce4f54ea37372965cc4b"]])
+        self.assertEqual(len(base), 1)
+        froms = [l.split()[1] for l in open(os.path.join(os.path.dirname(HERE), "k8s", "Dockerfile")) if l.startswith("FROM ")]
+        self.assertEqual(froms, [base[0][1]])   # the allow file and the Dockerfile name the same pinned base
 
     def test_accepted_file_matches_the_patches_exactly(self):
         lines = [l.split() for l in open(os.path.join(PATCHES, "ACCEPTED.sha256")) if l.strip() and not l.startswith("#")]

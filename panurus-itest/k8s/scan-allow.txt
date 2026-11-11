@@ -1,4 +1,5 @@
 # Known benign private-key blocks in the PINNED base image (debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc), found by the first run of rdbi-image.yml
 # (run 43080311512): libgnutls30 embeds a PKCS8 PEM self-test key in its shared library. Matched by path AND sha256 of the file; any other file, or this path with other content, still fails the scan.
-# Re-derive the hash when the base digest in panurus-itest/k8s/Dockerfile changes.
+# The `base` line must equal the FROM of panurus-itest/k8s/Dockerfile or the scanner refuses (exit 3). A base bump: re-run the scan WITHOUT the allow-list first, then re-derive the hash and the base line.
+base debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc
 usr/lib/x86_64-linux-gnu/libgnutls.so.30.34.3 779b25d20249988bea2c1aa6bbeb218f5ae7ea8a9d30ce4f54ea37372965cc4b

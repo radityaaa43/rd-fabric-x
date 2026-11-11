@@ -7,6 +7,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
 jobs:
   image:
     runs-on: ubuntu-latest
@@ -63,10 +66,9 @@ jobs:
           push: false
           tags: rdbi-node:scan
       - name: Scan the image layers for private keys
-        shell: bash
         run: |
           docker save rdbi-node:scan -o "$RUNNER_TEMP/image.tar"
-          python3 panurus-itest/scripts/scan_image_keys.py "$RUNNER_TEMP/image.tar" --allow panurus-itest/k8s/scan-allow.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 panurus-itest/scripts/scan_image_keys.py "$RUNNER_TEMP/image.tar" --allow panurus-itest/k8s/scan-allow.txt --dockerfile panurus-itest/k8s/Dockerfile | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
