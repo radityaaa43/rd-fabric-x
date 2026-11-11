@@ -21,6 +21,8 @@ type fakeBI struct {
 	refusedAll []string          // txs BI refuses in the startup pass
 	allErr     error             // transport failure of the startup pass
 	panicOn    string            // deliver panics for this tx
+	needs      map[string]string // tx -> the tx whose report BI needs first (causal order)
+	done       map[string]bool
 	outcome    map[string]string // per tx; missing = Recorded
 	logs       []string
 }
@@ -42,6 +44,13 @@ func (f *fakeBI) redeliverer(startup bool) *redeliverer {
 			if o, ok := f.outcome[tx]; ok {
 				return o
 			}
+			if need := f.needs[tx]; need != "" && !f.done[need] {
+				return "missing inputs of an earlier report"
+			}
+			if f.done == nil {
+				f.done = map[string]bool{}
+			}
+			f.done[tx] = true
 			return rep.Recorded
 		},
 		deliverAll: func() ([]string, error) { f.fullPasses++; return f.refusedAll, f.allErr },
@@ -222,8 +231,8 @@ func TestRedeliverContinuesPastRefusal(t *testing.T) {
 	r.note("a", "not delivered: x")
 	r.note("b", "not delivered: x")
 	r.tick()
-	if !reflect.DeepEqual(f.reports, []string{"a", "b"}) {
-		t.Fatalf("reports = %v, want [a b]: a refusal must not stop the tick", f.reports)
+	if !reflect.DeepEqual(f.reports, []string{"a", "b", "a"}) {
+		t.Fatalf("reports = %v, want [a b a]: a refusal must not stop the tick; the pass repeats after progress", f.reports)
 	}
 	if got := r.size(); got != 1 {
 		t.Fatalf("due set = %d, want 1 (only a stays due)", got)
@@ -364,5 +373,67 @@ func TestRedeliverGivesUpAfterRepeatedRefusals(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no 'giving up' line: %q", f.logs)
+	}
+}
+
+// D1: dependent reports refused in reverse arrival order must all go out within ONE tick: the pass repeats while a
+// report was delivered, and a refusal counts only on a pass without progress. Six dependents exceed maxRefusals.
+func TestRedeliverChainInReverseOrderInOneTick(t *testing.T) {
+	f := &fakeBI{needs: map[string]string{"t2": "t1", "t3": "t2", "t4": "t3", "t5": "t4", "t6": "t5"}}
+	r := f.redeliverer(false)
+	for _, tx := range []string{"t6", "t5", "t4", "t3", "t2", "t1"} { // worst case: arrival order is the reverse of causal order
+		r.note(tx, "not delivered: x")
+	}
+	r.tick()
+	if r.size() != 0 {
+		t.Fatalf("due set = %d after one tick, want 0 (reports sent: %v)", r.size(), f.reports)
+	}
+	for _, tx := range []string{"t1", "t2", "t3", "t4", "t5", "t6"} {
+		if !f.done[tx] {
+			t.Fatalf("%s not delivered: a dependent chain lost its tail", tx)
+		}
+	}
+}
+
+// D1: a refusal is counted once per tick that makes no progress on it, not once per pass.
+func TestRedeliverRefusalCountedOnPassWithoutProgress(t *testing.T) {
+	f := &fakeBI{outcome: map[string]string{"a": "token request does not match"}}
+	r := f.redeliverer(false)
+	r.note("a", "not delivered: x")
+	r.note("b", "not delivered: x")
+	for i := 1; i < maxRefusals; i++ {
+		r.tick() // b is delivered in the first tick, a is refused in the pass without progress each tick
+	}
+	if r.size() != 1 {
+		t.Fatalf("due set = %d after %d ticks, want 1 (a kept, %d of %d refusals)", r.size(), maxRefusals-1, maxRefusals-1, maxRefusals)
+	}
+	r.tick()
+	if r.size() != 0 {
+		t.Fatalf("due set = %d, want 0 after %d refusals", r.size(), maxRefusals)
+	}
+}
+
+// The report view's answer of an unexpected type must not panic the request goroutine (api.go run()).
+type oddReportNode struct{ fakeNode }
+
+func (o oddReportNode) CallView(fid string, in []byte) (any, error) {
+	if fid == "report" {
+		return 42, nil
+	}
+	return o.fakeNode.CallView(fid, in)
+}
+
+func TestRunSurvivesOddReportAnswer(t *testing.T) {
+	old := pending
+	pending = newRedeliverer(redeliverFuncs{}, false)
+	t.Cleanup(func() { pending = old })
+	calls, _ := setup(t, "bank2", 200, "[]", "")
+	clients["bank2"] = oddReportNode{fakeNode{"bank2", calls}}
+	code, out := post(`{"op":"transfer","from":"bank2","to":"bank3","type":"RD","amount":"7"}`)
+	if code != 200 || !strings.Contains(out, "not delivered") {
+		t.Fatalf("got %d %s, want 200 with a not-delivered report", code, out)
+	}
+	if pending.size() != 1 {
+		t.Fatalf("due set = %d, want 1", pending.size())
 	}
 }
