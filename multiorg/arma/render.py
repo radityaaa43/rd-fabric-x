@@ -3,7 +3,7 @@
 
 usage: render.py bi|bank-a|bank-b|bank-c --exchange DIR --genesis FILE --genesis-sha256 HEX [--image repo@sha256:HEX] [--replicas N]
                  [--zone Z] [--storage-class SC] [--ips FILE] [--msp-id-format org{n}]
-bank-c is cluster 2: --zone and --storage-class are required (lead: ap-southeast-1a, fabricx-essd). Cluster 1 defaults: ap-southeast-5b, alicloud-essd-wffc.
+bank-c is cluster 2: --storage-class is required (fabricx-essd); --zone is optional, without it no zone pin (since 2026-11-11: zone 1a had no pod/volume room). Cluster 1 defaults: ap-southeast-5b, alicloud-essd-wffc.
 DIR holds org1..org4 (public trees from multiorg/fca/enroll.py; each is checked with check_exchange and must be clean). FILE is the S10 genesis block,
 refused unless its sha256 equals HEX and it is at most 700 KiB. Output (YAML documents, apply order): ConfigMaps genesis-block, arma-public-<N>, 4 x arma-config-<role>-<N>,
 NetworkPolicy allow-arma-peers, then 4 StatefulSets orderer-{router,batcher,consenter,assembler}-<N>. No Secret (orderer-<role>-<N>-secret is made by enroll.py)
@@ -145,11 +145,12 @@ def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zo
     if "{n}" not in msp_id_format or not re.fullmatch(r"[A-Za-z][A-Za-z0-9._-]*", msp_id_format.replace("{n}", "1")):
         die(f"--msp-id-format {msp_id_format!r} must contain {{n}} and give an MSP name")
     cluster = "cluster2" if party == "bank-c" else "cluster1"
-    if party == "bank-c" and (zone is None or storage_class is None):
-        die("bank-c is cluster 2: --zone and --storage-class are both required (never guessed)")
-    zone = DEFAULT_ZONE if zone is None else zone
+    if party == "bank-c" and storage_class is None:
+        die("bank-c is cluster 2: --storage-class is required (never guessed); --zone is optional (none = no zone pin, the WaitForFirstConsumer class binds where the pod lands)")
+    if zone is None and party != "bank-c":
+        zone = DEFAULT_ZONE
     storage_class = DEFAULT_SC if storage_class is None else storage_class
-    if not re.fullmatch(r"[a-z0-9][a-z0-9-]*", zone):
+    if zone is not None and not re.fullmatch(r"[a-z0-9][a-z0-9-]*", zone):
         die(f"zone {zone!r} is not a zone name")
     if not re.fullmatch(r"[a-z0-9][a-z0-9.-]*", storage_class):
         die(f"storage class {storage_class!r} is not a name")
@@ -204,7 +205,7 @@ def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zo
             "spec": {"replicas": replicas, "serviceName": f"lb-{n}", "selector": {"matchLabels": {"app.kubernetes.io/name": name}},
                      "template": {"metadata": {"labels": labels}, "spec": {
                          "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "seccompProfile": {"type": "RuntimeDefault"}, "fsGroup": UID},
-                         "nodeSelector": {"topology.kubernetes.io/zone": zone}, "affinity": affinity, "hostAliases": aliases,
+                         **({"nodeSelector": {"topology.kubernetes.io/zone": zone}} if zone else {}), "affinity": affinity, "hostAliases": aliases,
                          "containers": [{
                              "name": "orderer", "image": image, "args": [CLI_CMD[role], "--config=/config/node_config.yaml"],
                              # S11 pod contract with lb-<N>: one NAMED port per role pod (the Service targetPort), plus ops on its own number
