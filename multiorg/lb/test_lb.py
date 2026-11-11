@@ -1,4 +1,4 @@
-"""Offline tests for multiorg/lb (fabricx S16 input): per-party LoadBalancer Service render (per-role as an option). No cluster.
+"""Offline tests for multiorg/lb (fabricx Arma party endpoints, PLAN S11/S18): per-party LoadBalancer Service render (per-role as an option). No cluster.
 
   python3 -m unittest discover -s multiorg/lb        (needs PyYAML)
 """
@@ -24,9 +24,9 @@ def cli(*args):
     return r
 
 
-# S11 pod contract (named in the PR body): the four Arma role pods of a party carry these labels and declare these NAMED container ports.
+# S11 pod contract (named in the PR body): the four Arma role pods of a party carry this shared label and declare these NAMED container ports.
 # Named targetPorts make a role's port reach only the pods that declare it (a numeric targetPort would route to every selected pod).
-POD_LABELS = lambda p: {"app.kubernetes.io/part-of": "rd-fabricx", "party": p, "rd-fabricx/arma": "true"}
+POD_LABELS = lambda p: {"rd-fabricx/arma-party": str(enroll.PARTY_N[p])}   # lead: one shared label on all four role pods of party N
 ANNOTATIONS = {PREFIX + "acl-status": "on", PREFIX + "acl-type": "white", PREFIX + "address-type": "internet", PREFIX + "scheduler": "wrr"}
 
 

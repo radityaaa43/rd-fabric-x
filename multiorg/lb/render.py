@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Print the LoadBalancer Service of one party (fabricx S16; stdout only, nothing is applied, no cluster).
+"""Print the LoadBalancer Service of one party (fabricx Arma party endpoints, PLAN S11/S18; stdout only, nothing is applied, no cluster).
 
 usage: render.py bi|bank-a|bank-b|bank-c --acl-id acl-<id> --source-range <ipv4>/32 [--source-range <ipv4>/32 ...] [--per-role]
 Default (decided): ONE Service `lb-<N>` in rd-fabricx-<party> carrying the four listeners (assembler 8011, consenter 8012, router 8013,
@@ -46,10 +46,10 @@ def render(party, acl_id, ranges, per_role=False):
                                          # Local mounts only the nodes where the pods run and, per the ACK CLB page, needs the wrr scheduler
                                          A + "scheduler": "wrr"}},
             "spec": {"type": "LoadBalancer", "externalTrafficPolicy": "Local", "loadBalancerSourceRanges": ranges,
-                     # S11 pod contract: the four Arma role pods of the party carry these labels and declare NAMED container ports
+                     # S11 pod contract: the four Arma role pods of the party carry the shared label rd-fabricx/arma-party=<N> and declare NAMED container ports
                      # router/batcher1/consenter/assembler. A named targetPort sends a port only to the pods that declare it.
                      # [unverified until S11 pods exist]
-                     "selector": {"app.kubernetes.io/part-of": "rd-fabricx", "party": party, "rd-fabricx/arma": "true"},
+                     "selector": {"rd-fabricx/arma-party": str(n)},
                      "ports": [{"name": r, "port": PORT_PLAN[r], "targetPort": r, "protocol": "TCP"} for r in roles]}}
 
     if per_role:   # documented option: four Services, four CLBs

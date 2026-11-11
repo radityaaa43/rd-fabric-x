@@ -1,7 +1,7 @@
-# Runbook: per-party LoadBalancer Service (S16, render only)
+# Runbook: per-party LoadBalancer Service for the Arma party endpoints (PLAN S11/S18, DELTA 14; render only)
 
 `render.py` prints one `Service type: LoadBalancer` for one party carrying the four Arma listeners (assembler, consenter, router, batcher1);
-`--per-role` prints four Services instead. It is the S16 manifest (cross-cluster paths use the public LB endpoint of the target role).
+`--per-role` prints four Services instead. It is the manifest of the Arma party endpoints (PLAN S11/S18; not S16, which is the fx-gw gateway + OPA): cross-cluster paths between party 4 and parties 1-3 use the public LB endpoint of the target role.
 It only prints to stdout; it never applies anything and never contacts a cluster. Ports come from `PORT_PLAN` in `multiorg/fca/enroll.py`
 (assembler 8011, consenter 8012, router 8013, batcher1 8014). Name: `lb-<N>` in namespace `rd-fabricx-<party>` (N: bi 1, bank-a 2, bank-b 3, bank-c 4).
 
@@ -21,7 +21,7 @@ Source range per side:
 - bi, bank-a, bank-b live on cluster 1 and are called from cluster 2 (bank-c): use the cluster 2 egress address as `/32`.
 - bank-c lives on cluster 2 and is called from cluster 1 (bi, bank-a, bank-b): use the cluster 1 egress address as `/32`.
 
-The egress addresses are not in this repo; take them from the S16 PRE. Do not guess them.
+The egress addresses are not in this repo; they are given in the GO text (lead). Do not guess them.
 
 ## Order
 
@@ -42,7 +42,7 @@ Decided: one CLB per party, 4 in total. With `--per-role` it would be 4 per part
 `externalTrafficPolicy: Local` (the CLB mounts only the nodes where the pods run; keeps the client source IP) with the `scheduler: wrr` annotation, which the ACK page says Local mode requires.
 
 ## S11 pod contract (what the role pods must look like for this Service)
-- Labels on the router, batcher1, consenter and assembler pods of a party: `app.kubernetes.io/part-of: rd-fabricx`, `party: <party>`, `rd-fabricx/arma: "true"` (the Service selector; not used by the CA pods, which carry `app.kubernetes.io/name: fca-org<N>`).
+- ONE shared label on all four role pods (router, batcher1, consenter, assembler) of party N: `rd-fabricx/arma-party: "<N>"` (N: bi 1, bank-a 2, bank-b 3, bank-c 4). It is the Service selector; the CA pods do not carry it (they have `app.kubernetes.io/name: fca-org<N>`).
 - Each pod declares a NAMED containerPort: `router` 8013, `batcher1` 8014, `consenter` 8012, `assembler` 8011. The Service uses the names as targetPort, so a port reaches only the pods that declare it (a numeric targetPort would send every port to every selected pod).
 - [unverified] until S11 exists; the S11 render must be tested against this contract. Until then the CLB has no healthy backend (health abnormal is expected).
 
@@ -54,6 +54,13 @@ python3 multiorg/lb/render.py <party> --acl-id <acl> --source-range <cidr> | kub
 - bank-c (cluster 2, `KUBECONFIG_C2`, only `rd-fabricx-bank-c` named): `--acl-id acl-gs5m5o9vb3olr19484tyg --source-range 8.215.62.92/32` (the cluster-1 egress address).
 - Self-checks to quote per LB: Service annotations (acl-status/acl-id/acl-type), ingress IP from `kubectl get svc`, the CCM events from `kubectl describe svc` (AclStatus/AclType/AclId); no cloud CLI. ACL entries are not readable from the cluster and are not changed by this render.
 - Rollback: `kubectl delete svc lb-<N> -n rd-fabricx-<party>` releases the CLB; the CLB IP changes on re-create, and the certs/genesis would carry the old IP (B3-SAN), so do not delete after B3-SAN.
+
+## Constraints from the user and the ACL
+- NO new ACL and NO new ACL entry (user-only). Each `lb-<N>` carries `acl-status: "on"`, `acl-type: "white"` and an EXISTING id: parties 1-3 (Jakarta) `acl-d9ji5nwbqutwulof33ydb` (entry 47.237.84.150/32 = SG egress); party 4 (SG) `acl-gs5m5o9vb3olr19484tyg` (entry 8.215.62.92/32 = Jakarta egress).
+- Consequence: through these CLBs only the OTHER cluster gets in. A Jakarta pod calling a Jakarta CLB address comes from the Jakarta egress, which is not in parties 1-3's ACL, unless the traffic is short-circuited inside the cluster [unverified]. The 100.64.0.0/10 element is added only after the ACL is verified on each listener (positive control from the peer cluster, negative control from elsewhere), i.e. not before the S11 pods exist.
+
+## AFTER check
+`agents/analyst/design/ARCHITECTURE-fabricx.md` (read from origin/master 2026-11-11): 2a.1 row "Arma party endpoints": "Router, batcher, consenter, assembler each with public `Host`, `Port`, `TLSCert` ... `UseTLSRouter` / `UseTLSAssembler` set to TLS or mTLS; same config block everywhere" (:237); diagram edge "cross-cluster: consenter BFT, batcher, router, mTLS" between party 4 and parties 1-3 (:215); DELTA 14 (:285). The per-party LB Service with the four listeners behind an ACL matches the cross-cluster edge. OPEN, raised as DEVIATION to lead: the genesis has ONE `Host` per role, the same block for every party, while the plan wants in-cluster names for Jakarta peers and LB hosts only for party 4 pairs. One config block cannot hold both (see the S10 runbook, "Host per role").
 
 ## Annotations
 
@@ -74,3 +81,4 @@ v1.9.3.164-g2105d2e-aliyun or later; `address-type` needs CCM v1.9.3 or later. T
 - [unverified] CCM version on cluster 1 and cluster 2 (see above).
 - `externalTrafficPolicy: Local` + `scheduler: wrr` are set (lead). The ACK page says Local attaches only nodes hosting the pods and needs `wrr`; that it also keeps the client source IP for the ACL is Kubernetes semantics, not stated on that page [unverified].
 - Per-role (16 CLBs) versus per-party (4 CLBs): DECIDED per-party; per-role kept as `--per-role`.
+- `loadBalancerSourceRanges` stays as a field (lead): it is not an ACL on Alibaba CLB; the three `acl-*` annotations are the control.
