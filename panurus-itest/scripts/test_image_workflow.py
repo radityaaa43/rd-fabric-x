@@ -94,6 +94,13 @@ class ImageWorkflow(unittest.TestCase):
         self.assertLess(sc, push)
         self.assertIn("scan_image_keys.py", st[sc]["run"])
 
+    def test_ldd_check_does_not_pipe_ldd(self):
+        # run 43082625860 failed here: `ldd bin | grep -q "not a dynamic executable"` under pipefail fails because ldd itself exits 1 for a static binary.
+        run = [s for s in steps(load()) if s.get("name", "").startswith("Build rdbi-node and rdbi-driver")][0]["run"]
+        self.assertNotRegex(run, r"ldd[^\n|]*\|(?!\|)")   # a single pipe after ldd (|| is fine)
+        self.assertIn('|| true)', run)                        # ldd's own exit status is ignored ...
+        self.assertIn('grep -q "not a dynamic executable" <<<', run)   # ... and the verdict is a plain command, so -e still fails the step on a dynamic binary
+
     def test_digest_is_reported(self):
         self.assertIn("GITHUB_STEP_SUMMARY", open(WF).read())
         self.assertIn("steps.build.outputs.digest", open(WF).read())

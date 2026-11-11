@@ -55,7 +55,10 @@ jobs:
           mkdir -p "$GITHUB_WORKSPACE/bin"
           CGO_ENABLED=0 go build -trimpath -o "$GITHUB_WORKSPACE/bin/rdbi-node" ./token/fungible/rdbi/cmd/node
           CGO_ENABLED=0 go build -trimpath -o "$GITHUB_WORKSPACE/bin/rdbi-driver" ./token/fungible/rdbi/cmd/driver
-          for b in rdbi-node rdbi-driver; do ldd "$GITHUB_WORKSPACE/bin/$b" 2>&1 | grep -q "not a dynamic executable"; done
+          for b in rdbi-node rdbi-driver; do
+            out=$(ldd "$GITHUB_WORKSPACE/bin/$b" 2>&1 || true)
+            grep -q "not a dynamic executable" <<<"$out"
+          done
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
       - name: Build the image locally for the key scan (not pushed)
         uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
