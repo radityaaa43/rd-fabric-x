@@ -14,12 +14,9 @@ metadata:
   namespace: ${NS}
 spec:
   podSelector: {}
-  policyTypes: [Ingress, Egress]
+  policyTypes: [Ingress]
   ingress:
     - from:
-        - podSelector: {}
-  egress:
-    - to:
         - podSelector: {}
 ---
 apiVersion: networking.k8s.io/v1
@@ -31,10 +28,4 @@ spec:
   podSelector: {}
   policyTypes: [Egress]
   egress:
-    - to:
-        - namespaceSelector:
-            matchLabels:
-              kubernetes.io/metadata.name: kube-system
-      ports:
-        - {protocol: UDP, port: 53}
-        - {protocol: TCP, port: 53}
+    - {}  # L0: egress open to anything; name kept for parity with zeto, tightened at S11/S13

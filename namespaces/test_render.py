@@ -35,8 +35,9 @@ def check(docs, party):
     assert deny["podSelector"] == {} and deny["policyTypes"] == ["Ingress"] and "ingress" not in deny, deny
     dns = by["NetworkPolicy"]["allow-dns-egress"]["spec"]
     assert "Egress" in dns["policyTypes"] and dns["podSelector"] == {}, dns
-    ports = {(p["protocol"], p["port"]) for r in dns["egress"] for p in r["ports"]}
-    assert ports == {("UDP", 53), ("TCP", 53)}, ports
+    assert dns["egress"] == [{}], dns  # L0: egress open to anything (lead decision, tightened at S11/S13)
+    same = by["NetworkPolicy"]["allow-same-namespace"]["spec"]
+    assert same["policyTypes"] == ["Ingress"] and same["ingress"] == [{"from": [{"podSelector": {}}]}], same
     rb = by["RoleBinding"][SA]
     assert rb["roleRef"]["kind"] == "Role" and rb["roleRef"]["name"] == SA, rb["roleRef"]
     assert rb["subjects"] == [{"kind": "ServiceAccount", "name": SA, "namespace": ns}], rb["subjects"]
