@@ -17,6 +17,7 @@ _spec.loader.exec_module(render)
 
 PARTIES = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
 POD = {"bi": "bi", "bank-a": "bank2", "bank-b": "bank3", "bank-c": "bank4"}
+POD_NODE = {"bi": "issuer", "bank-a": "bank2", "bank-b": "bank3", "bank-c": "bank4"}   # the node the gateway fronts
 DIGEST = "docker.io/example/rdbi@sha256:" + "a" * 64
 CERT = "-----BEGIN CERTIFICATE-----\nMII\n-----END CERTIFICATE-----\n"
 P2P = {"cluster1": {1: "10.200.1.1", 2: "10.200.1.2", 3: "10.200.1.3", 4: "47.1.1.4"}, "cluster2": {1: "8.1.1.1", 2: "8.1.1.2", 3: "8.1.1.3", 4: "10.210.1.4"}}
@@ -220,6 +221,43 @@ class Network(Base):
         for bad in ({"acl_id": "x", "ranges": ["1.2.3.4/32"]}, {"acl_id": "acl-abc", "ranges": []}, {"acl_id": "acl-abc", "ranges": ["1.2.3.0/24"]}):
             with self.assertRaises(SystemExit):
                 self.r("bank-a", p2p_lb=bad)
+
+    def gw_exchange(self, party, text="-----BEGIN CERTIFICATE-----\nMIIgw\n-----END CERTIFICATE-----\n"):
+        n = PARTIES[party]
+        d = f"{self.tmp.name}/gwx"
+        os.makedirs(f"{d}/org{n}/gw", exist_ok=True)
+        with open(f"{d}/org{n}/gw/{POD_NODE[party]}-gw.pem", "w") as f:
+            f.write(text)
+        return d
+
+    def test_gw_exchange_swaps_the_party_nodes_client_cert_only(self):
+        for party in PARTIES:
+            node = POD_NODE[party]
+            docs = self.r(party, gw_exchange=self.gw_exchange(party))
+            cores = self.by(docs, "ConfigMap")
+            gw_core = yaml.safe_load(cores[f"rdbi-core-{node}"]["data"]["core.yaml"])
+            self.assertEqual(gw_core["fsc"]["client"]["certs"], [f"{render.T}/public/gw/{node}-gw.pem"])
+            ep = f"endorser-{PARTIES[party]}"
+            ep_core = yaml.safe_load(cores[f"rdbi-core-{ep}"]["data"]["core.yaml"])
+            self.assertEqual(ep_core["fsc"]["client"]["certs"], [f"{render.T}/own/{ep}/fsc/admin.pem"])   # the endorser has no gateway: unchanged
+            pub = cores["rdbi-public"]["data"] if "rdbi-public" in cores else self.by(docs, "ConfigMap")["rdbi-public"]["data"]
+            self.assertEqual(pub[f"gw__{node}-gw.pem"], "-----BEGIN CERTIFICATE-----\nMIIgw\n-----END CERTIFICATE-----\n")
+            dep = self.by(docs, "Deployment")[f"rdbi-{POD[party]}"]
+            items = [v for v in dep["spec"]["template"]["spec"]["volumes"] if v["name"] == "public"][0]["configMap"]["items"]
+            self.assertIn({"key": f"gw__{node}-gw.pem", "path": f"gw/{node}-gw.pem"}, items)
+
+    def test_without_gw_exchange_nothing_about_the_gateway_is_rendered(self):
+        docs = self.r("bank-a")
+        pub = self.by(docs, "ConfigMap")["rdbi-public"]["data"]
+        self.assertFalse([k for k in pub if k.startswith("gw__")])
+        c = yaml.safe_load(self.by(docs, "ConfigMap")["rdbi-core-bank2"]["data"]["core.yaml"])
+        self.assertEqual(c["fsc"]["client"]["certs"], [f"{render.T}/own/bank2/fsc/admin.pem"])
+
+    def test_gw_cert_must_exist_and_be_public(self):
+        with self.assertRaises(SystemExit):
+            self.r("bank-a", gw_exchange=f"{self.tmp.name}/nowhere")
+        with self.assertRaises(SystemExit):
+            self.r("bank-a", gw_exchange=self.gw_exchange("bank-a", "-----BEGIN PRIVATE KEY-----\nAA\n-----END PRIVATE KEY-----\n"))
 
     def test_p2p_addresses_are_required(self):
         with self.assertRaises(SystemExit):

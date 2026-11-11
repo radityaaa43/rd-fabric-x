@@ -3,7 +3,7 @@
 
 usage: render.py bi|bank-a|bank-b|bank-c --templates <live dir with <node>/{core.yaml,role,policy.env}> --fsc-exchange <dir with org1..org4 from enroll_fsc.py --out>
                  --tls-exchange <dir with org<N>/msp/tlscacerts> --image repo@sha256:HEX --p2p-ips FILE --bootstrap-cert FILE [--central-keys FILE] [--allow-uncovered]
-                 [--storage-class SC] [--zone Z] [--p2p-lb-acl acl-ID --p2p-lb-range <ipv4>/32 ...]
+                 [--gw-exchange <dir with org<N>/gw/<node>-gw.pem from enroll_gw.py>] [--storage-class SC] [--zone Z] [--p2p-lb-acl acl-ID --p2p-lb-range <ipv4>/32 ...]
 Objects (apply order): ConfigMap rdbi-public (every node's public certs + the TLS CA bundle), ConfigMaps rdbi-core-<node> (multiorg/fsc/core_rewrite.py output),
 Services <node> (grpc/p2p/web; the node TLS certificates carry the node name), PVC rdbi-<pod>-state, NetworkPolicy rdbi-traffic, Deployment rdbi-<pod> (the org's
 two nodes: init container lays the files out under $T like k8s.py did from a tarball: own/<node> from a projected volume of Secret rdbi-<pod>-files (enroll_fsc.py),
@@ -51,7 +51,7 @@ def flat(rel):
     return rel.replace("/", "__")
 
 
-def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage_class=None, zone=None, central_keys=(), allow_uncovered=False, p2p_lb=None, home=None, bootstrap_cert=None):
+def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage_class=None, zone=None, central_keys=(), allow_uncovered=False, p2p_lb=None, home=None, bootstrap_cert=None, gw_exchange=None):
     if party not in PARTY_N:
         die(f"party {party!r} must be one of {', '.join(PARTY_N)}")
     if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image or ""):
@@ -72,6 +72,7 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
     meta = lambda name, extra=None: {"name": name, "namespace": ns, "labels": {**base, **(extra or {})}}
 
     cores, manifests, ports, role_env = {}, {}, {}, {}
+    gw_public = {}
     all_nodes = {m: enroll_fsc.NODES[p][1] for p, m in PARTY_N.items()}
     p2p_ports = {}
     for m, ns_ in all_nodes.items():
@@ -79,7 +80,15 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
             c = yaml.safe_load(open(f"{templates}/{x}/core.yaml"))
             p2p_ports[x] = (port(c["fsc"]["grpc"]["address"]), port(c["fsc"]["p2p"]["listenAddress"]), port(c["fsc"]["web"]["address"]))
             if x in nodes:
-                cores[x], manifests[x] = cr.per_org_core(c, x, home, T)
+                gwc = None
+                if gw_exchange and x == nodes[0]:   # S14: the party node (issuer/bank<N>) is the one the gateway calls; the endorser has no gateway
+                    gwc = f"{gw_exchange}/org{n}/gw/{x}-gw.pem"
+                    if not os.path.isfile(gwc):
+                        die(f"--gw-exchange: {gwc} is missing (enroll_gw.py output)")
+                    if "PRIVATE KEY" in open(gwc).read():
+                        die(f"{gwc} holds a private key: only the public gateway certificate belongs here")
+                    gw_public[f"gw__{x}-gw.pem"] = open(gwc).read()
+                cores[x], manifests[x] = cr.per_org_core(c, x, home, T, gw_cert=gwc)
                 env = [{"name": "FSCNODE_CFG_PATH", "value": f"{T}/live/{x}"}, {"name": "RDBI_ROLE", "value": open(f"{templates}/{x}/role").read().strip()}]
                 pe = f"{templates}/{x}/policy.env"
                 if os.path.exists(pe):
@@ -87,7 +96,7 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
                 role_env[x] = env
 
     # public material: every node's certificates + the TLS CAs of all four orgs
-    public = {}
+    public = dict(gw_public)
     for m, ns_ in all_nodes.items():
         for x in ns_:
             for rel in (f"fsc/{x}.pem", f"ids/{x}/msp/signcerts/cert.pem", f"ids/{x}/msp/cacerts/ca.pem"):
@@ -192,7 +201,7 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
 if __name__ == "__main__":
     p = argparse.ArgumentParser(usage=__doc__, allow_abbrev=False)
     p.add_argument("party")
-    for o in ("templates", "fsc-exchange", "tls-exchange", "image", "p2p-ips", "central-keys", "storage-class", "zone", "p2p-lb-acl", "bootstrap-cert"):
+    for o in ("templates", "fsc-exchange", "tls-exchange", "image", "p2p-ips", "central-keys", "storage-class", "zone", "p2p-lb-acl", "bootstrap-cert", "gw-exchange"):
         p.add_argument(f"--{o}")
     p.add_argument("--p2p-lb-range", action="append", default=[])
     p.add_argument("--allow-uncovered", action="store_true")
@@ -202,4 +211,4 @@ if __name__ == "__main__":
     ips = arma.load_ips(a.p2p_ips) if a.p2p_ips else None
     central = json.load(open(a.central_keys)) if a.central_keys else []
     lb = {"acl_id": a.p2p_lb_acl, "ranges": a.p2p_lb_range} if a.p2p_lb_acl else None
-    sys.stdout.write(render(a.party, a.templates, a.fsc_exchange, a.tls_exchange, a.image, ips, a.storage_class, a.zone, central, a.allow_uncovered, lb, bootstrap_cert=a.bootstrap_cert))
+    sys.stdout.write(render(a.party, a.templates, a.fsc_exchange, a.tls_exchange, a.image, ips, a.storage_class, a.zone, central, a.allow_uncovered, lb, bootstrap_cert=a.bootstrap_cert, gw_exchange=a.gw_exchange))
