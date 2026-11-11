@@ -1,0 +1,19 @@
+name: ci
+on: pull_request
+permissions:
+  contents: read
+jobs:
+  cfgupdate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: multiorg/cfgupdate
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: multiorg/cfgupdate/go.mod
+      - run: go vet ./... && go test ./...
