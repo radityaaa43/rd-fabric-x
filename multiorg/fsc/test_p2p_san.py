@@ -38,6 +38,13 @@ class San(unittest.TestCase):
     def test_one_of_two_names_fails(self):
         self.assertEqual(p2p_san.check(cert(["bank3"]), "bank-b", "bank3"), ["bank3.rd-fabricx-bank-b.svc.cluster.local"])
 
+    def test_fingerprint_is_sha256_of_the_cert(self):
+        c = cert(["a"])
+        f = p2p_san.fingerprint(c)
+        self.assertRegex(f, r"^[0-9A-F]{2}(:[0-9A-F]{2}){31}$")
+        self.assertEqual(f, p2p_san.fingerprint(c))
+        self.assertNotEqual(f, p2p_san.fingerprint(cert(["a"])))
+
     def test_listeners_cover_8_nodes(self):
         l = p2p_san.LISTEN
         self.assertEqual(sorted(n for p in l for n, _, _ in l[p]), sorted(["issuer", "endorser-1", "bank2", "endorser-2", "bank3", "endorser-3", "bank4", "endorser-4"]))

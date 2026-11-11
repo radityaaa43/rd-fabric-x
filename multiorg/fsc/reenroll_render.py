@@ -2,7 +2,7 @@
 """Print the objects of the in-namespace re-issue of ONE FSC identity cert (fabricx S13 fix: the p2p listener serves fsc/cert.pem, whose SAN must carry the names peers dial). stdout only, nothing applied.
 
 usage: reenroll_render.py role <party>
-       reenroll_render.py job <party> <node> --image repo@sha256:HEX --name GEN --api-cidr <ipv4>/32 [--mode run|dry-run|remove-prev]
+       reenroll_render.py job <party> <node> --image repo@sha256:HEX --name GEN --api-cidr <ipv4>/32 [--mode run|dry-run|remove-prev|restore-prev|restore-prev-dry-run]
 `role`: SA fsc-reenroll + Role fsc-reenroll (ONLY secrets get+patch, resourceNames [rdbi-<pod>-files]) + RoleBinding. TIME-BOXED: the operator creates it right before the org's Job and removes it right after (R13 log).
 `job`: NetworkPolicy + Job fsc-reenroll-<node>-<GEN> in rd-fabricx-<party>, applied by the org's OWN party-admin (the existing time-boxed s14-sign Role lets it create Jobs):
   image (digest, contains fabric-ca-client + the `fsc-reenroll` helper) runs `fabric-ca-client reenroll --csr.hosts <node>,<node>.<ns>.svc.cluster.local` authenticated by the CURRENT identity cert+key mounted from
@@ -17,6 +17,7 @@ PARTY = {"bi": (1, "bi", ["issuer", "endorser-1"]), "bank-a": (2, "bank2", ["ban
 LABELS = {"app.kubernetes.io/part-of": "rd-fabricx"}
 LOCK = "rd/egress-locked"
 UID = 10001
+MODES = {"run": [], "dry-run": ["--dry-run"], "remove-prev": ["--remove-prev"], "restore-prev": ["--restore-prev"], "restore-prev-dry-run": ["--restore-prev", "--dry-run"]}
 NAMES = "C=US,ST=North Carolina,O=Hyperledger"
 
 
@@ -52,8 +53,8 @@ def egress(spec):
 
 
 def render_job(party, node, image, name, api_cidr, mode="run"):
-    if mode not in ("run", "dry-run", "remove-prev"):
-        die("--mode must be run, dry-run or remove-prev")
+    if mode not in MODES:
+        die("--mode must be one of " + ", ".join(MODES))
     n, pod, nodes, ns = check(party)
     if node not in nodes:
         die(f"node {node!r} is not a node of {party} ({', '.join(nodes)})")
@@ -73,11 +74,10 @@ def render_job(party, node, image, name, api_cidr, mode="run"):
     sec = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}, "runAsNonRoot": True, "runAsUser": UID}
     cmd = ["fsc-reenroll", "--node", node, "--ca-url", f"http://fca-org{n}.{ns}.svc.cluster.local:7054", "--hosts", f"{node},{node}.{ns}.svc.cluster.local", "--names", NAMES,
            "--secret", secret, "--in", "/in", "--work", "/work", "--keys", ",".join(keys), "--gen", name]
-    if mode != "run":
-        cmd.append("--" + mode)
+    cmd += MODES[mode]
     volumes = [{"name": "work", "emptyDir": {"medium": "Memory"}}]
     mounts = [{"name": "work", "mountPath": "/work"}]
-    if mode != "remove-prev":   # remove-prev needs no identity at all: it only nulls the two .prev-<gen> keys
+    if mode in ("run", "dry-run"):   # remove-prev / restore-prev need no mounted identity: they only touch the .prev-<gen> keys through the API
         volumes.insert(0, {"name": "in", "secret": {"secretName": secret, "defaultMode": 0o440, "items": [{"key": keys[0], "path": "cert.pem"}, {"key": keys[1], "path": "key.pem"}]}})
         mounts.insert(0, {"name": "in", "mountPath": "/in", "readOnly": True})
     job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta(job_name, {"app.kubernetes.io/name": app}),

@@ -32,7 +32,7 @@ var safe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type cfg struct {
 	node, caURL, hosts, names, secret, in, work, keys, gen, api, ns, tokenFile, apiCA, caBin string
-	dryRun, removePrev                                                                       bool
+	dryRun, removePrev, restorePrev                                                          bool
 }
 
 func main() {
@@ -52,6 +52,7 @@ func run(args []string, out io.Writer) error {
 	}
 	fs.BoolVar(&c.dryRun, "dry-run", false, "")
 	fs.BoolVar(&c.removePrev, "remove-prev", false, "")
+	fs.BoolVar(&c.restorePrev, "restore-prev", false, "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -91,6 +92,30 @@ func run(args []string, out io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(out, "remove-prev %s OK resourceVersion=%s\n", c.gen, rv)
+		return nil
+	}
+
+	if c.restorePrev { // rollback: put the .prev-<gen> pair back as the live pair (the .prev keys stay until the separate remove-prev step)
+		rv, data, err := api.get()
+		if err != nil {
+			return err
+		}
+		pc, pk := data[prev[0]], data[prev[1]]
+		if pc == "" || pk == "" {
+			return fmt.Errorf("the Secret has no %s / %s (already removed?)", prev[0], prev[1])
+		}
+		if _, err := tls.X509KeyPair([]byte(pc), []byte(pk)); err != nil {
+			return errors.New("the .prev cert and the .prev key do not match: refusing to restore")
+		}
+		rvAfter, _, err := api.patch(map[string]any{"metadata": map[string]any{"resourceVersion": rv}, "data": map[string]any{keys[0]: b64([]byte(pc)), keys[1]: b64([]byte(pk))}}, c.dryRun)
+		if err != nil {
+			return err
+		}
+		if c.dryRun {
+			fmt.Fprintf(out, "restore-prev dry-run OK resourceVersion=%s (nothing changed)\n", rv)
+			return nil
+		}
+		fmt.Fprintf(out, "restore-prev %s OK resourceVersion before=%s after=%s\nRESTORED-PUBLIC-CERT-BEGIN\n%sRESTORED-PUBLIC-CERT-END\n", c.gen, rv, rvAfter, pc)
 		return nil
 	}
 
