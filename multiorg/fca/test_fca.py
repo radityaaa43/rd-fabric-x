@@ -80,6 +80,27 @@ class Manifests(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 render.render("bank-a", storage_class=bad)
 
+    def test_anti_affinity_against_other_fca_pods(self):
+        # qa placement note: fca-org1/2/3 all landed on member-16044-node. Required anti-affinity on the hostname, across namespaces.
+        def selects(sel, labels):
+            for e in sel["matchExpressions"]:
+                v = labels.get(e["key"])
+                ok = (v in e["values"]) if e["operator"] == "In" else (v not in e["values"])
+                if not ok:
+                    return False
+            return True
+        for p, n in PARTIES.items():
+            spec = next(x for x in docs(p) if x["kind"] == "Deployment")["spec"]["template"]["spec"]
+            terms = spec["affinity"]["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"]
+            self.assertEqual(len(terms), 1)
+            self.assertEqual(terms[0]["topologyKey"], "kubernetes.io/hostname")
+            self.assertEqual(terms[0]["namespaceSelector"], {})
+            sel = terms[0]["labelSelector"]
+            for m in PARTIES.values():
+                labels = {"app.kubernetes.io/name": f"fca-org{m}"}
+                self.assertEqual(selects(sel, labels), m != n, f"fca-org{n} must repel fca-org{m} only if m != n")
+            self.assertFalse(selects(sel, {"app.kubernetes.io/name": "rdbi-bank2"}))     # unrelated pods are not repelled
+
     def test_no_secret_material_in_manifest(self):
         out = render.render("bank-a")
         self.assertNotIn("Secret", [x["kind"] for x in docs("bank-a")])

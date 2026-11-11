@@ -49,7 +49,13 @@ def render(party, zone=None, storage_class=None):
          "spec": {"replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": {"app.kubernetes.io/name": name}},
                   "template": {"metadata": {"labels": labels}, "spec": {
                       "securityContext": {"runAsNonRoot": True, "runAsUser": 10001, "seccompProfile": {"type": "RuntimeDefault"}, "fsGroup": 10001},
-                      "nodeSelector": {"topology.kubernetes.io/zone": zone},  # WaitForFirstConsumer: the disk binds to the first pod's zone
+                      "nodeSelector": {"topology.kubernetes.io/zone": zone},
+                      # one CA per node: required anti-affinity against the other parties' CA pods, across namespaces
+                      "affinity": {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [{
+                          "topologyKey": "kubernetes.io/hostname", "namespaceSelector": {},
+                          "labelSelector": {"matchExpressions": [
+                              {"key": "app.kubernetes.io/name", "operator": "In", "values": [f"fca-org{m}" for m in N.values()]},
+                              {"key": "app.kubernetes.io/name", "operator": "NotIn", "values": [name]}]}}]}},  # WaitForFirstConsumer: the disk binds to the first pod's zone
                       "containers": [{
                           "name": "fabric-ca", "image": IMAGE, "command": ["sh", "-c", "fabric-ca-server start -b admin:$ADMIN_PASS --tls.enabled=false"],
                           "env": env, "ports": [{"name": "api", "containerPort": PORT}],
