@@ -114,6 +114,18 @@ class Exchange(unittest.TestCase):
         self.assertEqual(ce.problems(self.root, 2, require_known=True), [])
         self.assertEqual(ce.problems(self.root, 2), [])
 
+    def test_cli_require_flags(self):
+        for flag, sub in (("--require-admin", "admincerts"), ("--require-known", "knowncerts")):
+            r = subprocess.run([sys.executable, os.path.join(HERE, "check_exchange.py"), self.root, "2", flag], capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0, flag)
+            self.assertIn(f"msp/{sub}", r.stderr)
+            write(self.root, f"msp/{sub}/x-cert.pem", CERT)
+            manifest(self.root)
+            r = subprocess.run([sys.executable, os.path.join(HERE, "check_exchange.py"), self.root, "2", flag], capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "check_exchange.py"), self.root, "2", "--bogus"], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)
+
     def test_wrong_party_number_is_refused(self):
         self.assertNotEqual(check(self.root, 3).returncode, 0)
 
