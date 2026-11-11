@@ -5,6 +5,7 @@ usage: render.py role <party>
        render.py job <party> --tx FILE --cacert FILE --image repo@sha256:HEX --tx-name NAME
        render.py submit bi --tx FILE --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME      (tx1 submit --wait, BI only)
        render.py readback bi --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME              (`namespace list`, BI only)
+       render.py setuppp bi --image repo@sha256:HEX --name NAME [--namespace rd_dfabi_v2]       (rdbi-driver setup-pp, BI only)
        render.py probe <party> --image repo@sha256:HEX --name NAME --try LABEL=HOST:PORT ... [--allow pod=APP:PORT | --allow dns ...]
 `role`: Role s14-sign + RoleBinding in rd-fabricx-<party>: jobs create+get, pods get, pods/log get, bound to the org's own party-admin ServiceAccount only. TIME-BOXED: created right before the
 org's signing and removed right after its Job completed (both logged in R13). party-admin cannot create a Role, so the operator creates it (R13).
@@ -16,6 +17,9 @@ Secret therefore carries rd/egress-locked=true (check_locked refuses a render wi
 `submit`/`readback` (orchestrator S1, BI only): the router, sidecar and query service speak mTLS, so besides the org MSP key (submit only) the Job mounts the committer's TLS identity, the Secret
 committer-tls (server.crt/server.key/ca.crt as the TLS client cert/key/CA; EKU has clientAuth), read-only, plus ONE ConfigMap (the public tx, config, the public router CA). Egress (own policy, the pod carries
 the lock label): submit = router :8013 + sidecar :5130 + DNS; readback = query :5140 + DNS. Nothing else. Files are 0440 (root-owned, group = fsGroup): 0400 would be unreadable for uid 10001.
+`setuppp` (qa finding f; BI only): the one-shot `rdbi-driver setup-pp` as a Job under BI's own party-admin instead of an exec with cluster-admin. It mounts only what the BI gateway Deployment already
+mounts for the same client identity: CM fx-gw-1-client (client-config + the gateway public cert + the PUBLIC public-params.bin), Secret fx-gw-1-client key gw.key, CM rdbi-public ca-bundle.pem. Egress (own
+policy, lock label): the issuer FSC view port :5100 + DNS. The issuer node itself talks to the orderer/committer, not the Job.
 `probe`: a Job that mounts NO Secret, carries the label and tries TCP connects (bash /dev/tcp, 4 s each), printing `LABEL HOST:PORT OPEN|CLOSED`; its own policy allows only the --allow entries
 (pod=<app.kubernetes.io/name>:<port> in the same namespace, dns = kube-system :53). It proves the policy binds before any key-holding Job relies on it.
 """
@@ -197,13 +201,48 @@ def render_net(kind, party, image, tx_name, cacert, mspca, tx=None):
     return yaml.safe_dump_all([cm, sa, np, job], sort_keys=False)
 
 
+def render_setuppp(party, image, name, namespace="rd_dfabi_v2"):
+    if party != "bi":
+        die("setuppp is rendered for BI only (the issuer node installs the public parameters)")
+    n, ns = check(party)
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image or ""):
+        die("--image must be pinned by digest (repo@sha256:<64 hex>)")
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,28}[a-z0-9])?", name or ""):
+        die("--name must be 1-30 chars of [a-z0-9-]")
+    if not re.fullmatch(r"[A-Za-z0-9_]{1,40}", namespace or ""):
+        die("--namespace must be 1-40 chars of [A-Za-z0-9_]")
+    app, home = "s14-setuppp", "/home/rdbi"
+    meta = lambda nm, extra=None: {"name": nm, "namespace": ns, "labels": {**LABELS, **(extra or {})}}
+    np = {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(f"{app}-egress"),
+          "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": app}}, "policyTypes": ["Ingress", "Egress"], "egress": [egress_rule("pod=rdbi-bi:5100"), egress_rule("dns")]}}
+    live = {"name": "live", "projected": {"defaultMode": 0o440, "sources": [
+        {"configMap": {"name": "fx-gw-1-client", "items": [{"key": "client-config.yaml", "path": "live/issuer/client-config.yaml"}, {"key": "issuer-gw.pem", "path": "gw/issuer-gw.pem"}, {"key": "public-params.bin", "path": "live/public-params.bin"}]}},
+        {"secret": {"name": "fx-gw-1-client", "items": [{"key": "gw.key", "path": "gw/issuer-gw.key"}]}},
+        {"configMap": {"name": "rdbi-public", "items": [{"key": "ca-bundle.pem", "path": "live/issuer/tls-ca.crt"}]}}]}}
+    sec = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}, "runAsNonRoot": True, "runAsUser": UID}
+    job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta(f"{app}-{name}", {"app.kubernetes.io/name": app}),
+           "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 180, "ttlSecondsAfterFinished": 900,
+                    "template": {"metadata": {"labels": {**LABELS, "app.kubernetes.io/name": app, LOCK: "true"}}, "spec": {
+                        "serviceAccountName": "s14-signer", "automountServiceAccountToken": False, "restartPolicy": "Never",
+                        "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "fsGroup": UID, "seccompProfile": {"type": "RuntimeDefault"}},
+                        "imagePullSecrets": [{"name": "ghcr-pull"}],
+                        "containers": [{"name": "setup-pp", "image": image, "command": ["rdbi-driver", "setup-pp"],
+                                        "env": [{"name": "HOME", "value": home}, {"name": "NAMESPACE", "value": namespace}], "securityContext": sec,
+                                        "volumeMounts": [{"name": "home", "mountPath": home}, {"name": "live", "mountPath": f"{home}/.fabricx-token", "readOnly": True}],
+                                        "resources": {"requests": {"cpu": "20m", "memory": "64Mi", "ephemeral-storage": "8Mi"}, "limits": {"cpu": "500m", "memory": "256Mi", "ephemeral-storage": "32Mi"}}}],
+                        "volumes": [{"name": "home", "emptyDir": {}}, live]}}}}
+    check_locked([job])
+    return yaml.safe_dump_all([np, job], sort_keys=False)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("what", choices=["role", "job", "probe", "submit", "readback"])
+    ap.add_argument("what", choices=["role", "job", "probe", "submit", "readback", "setuppp"])
     ap.add_argument("party")
     for o in ("tx", "cacert", "image", "tx-name", "name"):
         ap.add_argument(f"--{o}")
     ap.add_argument("--mspca")
+    ap.add_argument("--namespace", default="rd_dfabi_v2")
     ap.add_argument("--try", dest="tries", action="append", default=[])
     ap.add_argument("--allow", action="append", default=[])
     a = ap.parse_args()
@@ -214,6 +253,11 @@ def main():
             if not getattr(a, o):
                 die(f"--{o.replace('_', '-')} is required")
         sys.stdout.write(render_net(a.what, a.party, a.image, a.tx_name, a.cacert, a.mspca, a.tx))
+    elif a.what == "setuppp":
+        for o in ("image", "name"):
+            if not getattr(a, o):
+                die(f"--{o} is required")
+        sys.stdout.write(render_setuppp(a.party, a.image, a.name, a.namespace))
     elif a.what == "probe":
         sys.stdout.write(render_probe(a.party, a.image, a.name, a.tries, a.allow))
     else:
