@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Check one org's public-material exchange directory (fabricx S9, RUNBOOK-S9-party-keys.md section 4).
 
-usage: check_exchange.py <exchange/org<N>> <N>
+usage: check_exchange.py <exchange/org<N>> <N> [--require-admin] [--require-known]
 Exit 0 only if: required public files exist, no private key material is present (by content or by name),
 endpoints.yaml names every role, and MANIFEST.sha256 matches the files. Prints the first problems to stderr.
 """
@@ -58,9 +58,12 @@ def problems(root, n, require_admin=False, require_known=False):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 3 or not sys.argv[2].isdigit():
+    flags = {"--require-admin", "--require-known"}
+    a = [x for x in sys.argv[1:] if x not in flags]
+    given = {x for x in sys.argv[1:] if x in flags}
+    if len(a) != 2 or not a[1].isdigit() or any(x.startswith("--") for x in a):
         sys.exit(__doc__)
-    found = problems(sys.argv[1], int(sys.argv[2]))
+    found = problems(a[0], int(a[1]), require_admin="--require-admin" in given, require_known="--require-known" in given)
     for p in found[:20]:
         print(p, file=sys.stderr)
     sys.exit(1 if found else 0)

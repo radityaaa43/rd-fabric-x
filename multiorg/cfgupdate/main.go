@@ -345,7 +345,7 @@ func verifyUpdate(blockPath, mspDir, envPath string) {
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Println("usage: cfgupdate build|verify [flags]")
+		fmt.Println("usage: cfgupdate genesis|check-genesis|build|verify|finalize|inspect|check-admins [flags]")
 		os.Exit(2)
 	}
 	fs := flag.NewFlagSet(os.Args[1], flag.ExitOnError)
@@ -353,6 +353,14 @@ func main() {
 	mspDir := fs.String("msp", "", "Org1 admin MSP dir")
 	out := fs.String("out", "update.env", "output envelope (build)")
 	envPath := fs.String("env", "update.env", "envelope to check (verify)")
+	idemixDir := fs.String("idemix-dir", "", "OPTIONAL, off by default: Idemix MSP dir with msp/IssuerPublicKey and msp/RevocationPublicKey (finalize); blocked at Channel V3_0")
+	bankIDs := fs.String("bank-ids", "org1,org2,org3,org4", "MSP ids of the banks as the genesis names them (finalize, inspect)")
+	threshold := fs.Int("threshold", 3, "signatures required out of the banks (finalize, inspect)")
+	wantIdemix := fs.Bool("idemix", false, "the genesis must carry the shared Idemix org (inspect); blocked at Channel V3_0, see RUNBOOK-genesis.md")
+	expect := fs.String("expect", "pass", "pass|fail (check-admins)")
+	chanCap := fs.String("channel-capability", capabilities[""], "Channel capability V3_0|V2_0|... (finalize, inspect)")
+	var admins listFlag
+	fs.Var(&admins, "admin", "org=<admin msp dir>, repeatable (check-admins)")
 	must(fs.Parse(os.Args[2:]), "flags")
 	switch os.Args[1] {
 	case "genesis":
@@ -363,6 +371,23 @@ func main() {
 		build(*blockPath, *mspDir, *out)
 	case "verify":
 		verifyUpdate(*blockPath, *mspDir, *envPath)
+	case "finalize", "inspect":
+		capabilities[""] = *chanCap
+		ids, err := parseIDs(*bankIDs)
+		must(err, "-bank-ids")
+		if *threshold < 1 || *threshold > len(ids) {
+			must(fmt.Errorf("threshold %d of %d", *threshold, len(ids)), "-threshold")
+		}
+		if os.Args[1] == "finalize" {
+			finalizeBlock(*blockPath, *idemixDir, *out, ids, int32(*threshold))
+		} else {
+			inspect(*blockPath, ids, int32(*threshold), *wantIdemix)
+		}
+	case "check-admins":
+		if *expect != "pass" && *expect != "fail" {
+			must(fmt.Errorf("-expect %q", *expect), "usage")
+		}
+		checkAdmins(*blockPath, admins, *expect)
 	default:
 		must(fmt.Errorf("unknown command %q", os.Args[1]), "usage")
 	}
