@@ -45,6 +45,7 @@ type fake struct {
 	queries  []string
 	ctypes   []string
 	conflict bool
+	extra    map[string]string
 	srv      *httptest.Server
 }
 
@@ -61,8 +62,11 @@ func newFake(t *testing.T, oldCert, oldKey string) *fake {
 		}
 		switch r.Method {
 		case "GET":
-			json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"resourceVersion": "10"}, "data": map[string]string{
-				"own__" + node + "__fsc__cert.pem": base64.StdEncoding.EncodeToString([]byte(f.oldCert)), "own__" + node + "__fsc__key.pem": base64.StdEncoding.EncodeToString([]byte(f.oldKey))}})
+			d := map[string]string{"own__" + node + "__fsc__cert.pem": base64.StdEncoding.EncodeToString([]byte(f.oldCert)), "own__" + node + "__fsc__key.pem": base64.StdEncoding.EncodeToString([]byte(f.oldKey))}
+			for k, v := range f.extra {
+				d[k] = base64.StdEncoding.EncodeToString([]byte(v))
+			}
+			json.NewEncoder(w).Encode(map[string]any{"metadata": map[string]any{"resourceVersion": "10"}, "data": d})
 		case "PATCH":
 			b, _ := io.ReadAll(r.Body)
 			var m map[string]any
@@ -238,4 +242,83 @@ func TestBadArgs(t *testing.T) {
 			t.Fatalf("accepted %v", a)
 		}
 	}
+}
+
+// restore-prev: the Secret holds the NEW pair (as keys cert/key) and the OLD pair as .prev-g1; the mode puts the old pair back.
+func rollbackEnv(t *testing.T) (*env, string, string) {
+	e := setup(t, goodSANs(), false)
+	oldC, oldK := mk(t, []string{"bi-server"})
+	newC, newK := mk(t, goodSANs())
+	e.f.oldCert, e.f.oldKey = newC, newK // the live keys now hold the new pair
+	e.f.extra = map[string]string{"own__endorser-3__fsc__cert.pem.prev-g1": oldC, "own__endorser-3__fsc__key.pem.prev-g1": oldK}
+	return e, oldC, oldK
+}
+
+func TestRestorePrevPutsTheOldPairBackWithAResourceVersionGuard(t *testing.T) {
+	e, oldC, oldK := rollbackEnv(t)
+	var out bytes.Buffer
+	if err := run(append(e.args, "--restore-prev"), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.f.patches) != 1 || e.f.queries[0] != "" || e.f.ctypes[0] != "application/merge-patch+json" {
+		t.Fatalf("patches=%d q=%v", len(e.f.patches), e.f.queries)
+	}
+	p := e.f.patches[0]
+	if p["metadata"].(map[string]any)["resourceVersion"] != "10" {
+		t.Fatal("no resourceVersion guard")
+	}
+	d := p["data"].(map[string]any)
+	if len(d) != 2 {
+		t.Fatalf("want exactly the two live keys, got %v", d)
+	}
+	gc, _ := base64.StdEncoding.DecodeString(d["own__endorser-3__fsc__cert.pem"].(string))
+	gk, _ := base64.StdEncoding.DecodeString(d["own__endorser-3__fsc__key.pem"].(string))
+	if string(gc) != oldC || string(gk) != oldK {
+		t.Fatal("the restored pair is not the .prev pair")
+	}
+	s := out.String()
+	if strings.Contains(s, "PRIVATE KEY") || !strings.Contains(s, "restore-prev g1 OK resourceVersion before=10 after=11") || !strings.Contains(s, "RESTORED-PUBLIC-CERT-BEGIN") || !strings.Contains(s, oldC) {
+		t.Fatalf("output:\n%s", s)
+	}
+	if _, err := os.Stat(e.caLog); err == nil {
+		t.Fatal("the CA client ran in restore-prev")
+	}
+}
+
+func TestRestorePrevDryRunOnlyDryRuns(t *testing.T) {
+	e, _, _ := rollbackEnv(t)
+	var out bytes.Buffer
+	if err := run(append(e.args, "--restore-prev", "--dry-run"), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(e.f.patches) != 1 || e.f.queries[0] != "dryRun=All" || !strings.Contains(out.String(), "restore-prev dry-run OK") {
+		t.Fatalf("%v %v %s", len(e.f.patches), e.f.queries, out.String())
+	}
+}
+
+func TestRestorePrevRefusals(t *testing.T) {
+	t.Run("no prev keys (already removed)", func(t *testing.T) {
+		e, _, _ := rollbackEnv(t)
+		e.f.extra = nil
+		if err := run(append(e.args, "--restore-prev"), &bytes.Buffer{}); err == nil || len(e.f.patches) != 0 {
+			t.Fatalf("err=%v patches=%d", err, len(e.f.patches))
+		}
+	})
+	t.Run("prev cert does not match prev key", func(t *testing.T) {
+		e, _, _ := rollbackEnv(t)
+		_, otherK := mk(t, []string{"x"})
+		e.f.extra["own__endorser-3__fsc__key.pem.prev-g1"] = otherK
+		var out bytes.Buffer
+		err := run(append(e.args, "--restore-prev"), &out)
+		if err == nil || len(e.f.patches) != 0 || strings.Contains(out.String()+err.Error(), "PRIVATE KEY") {
+			t.Fatalf("err=%v patches=%d", err, len(e.f.patches))
+		}
+	})
+	t.Run("conflict", func(t *testing.T) {
+		e, _, _ := rollbackEnv(t)
+		e.f.conflict = true
+		if err := run(append(e.args, "--restore-prev"), &bytes.Buffer{}); err == nil {
+			t.Fatal("expected the 409 to fail")
+		}
+	})
 }

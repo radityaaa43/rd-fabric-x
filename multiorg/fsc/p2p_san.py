@@ -6,7 +6,7 @@ usage: p2p_san.py file <cert.pem> <party> <node>       offline: the SAN of a PEM
        p2p_san.py live <party>... [--kube-dir DIR] [--ca-dir DIR/org<N>/msp/cacerts/*.pem]     read-only: port-forward (timeout 60) to svc/rdbi-p2p-<pod> with the party's OWN party-admin kubeconfig DIR/<party>.kubeconfig,
                                                         `openssl s_client -servername <node>`, check the presented cert; nothing written to disk; ends with "port-forwards: none left".
                                                         With --ca-dir the handshake is ALSO verified the way the dialer does: chain to the org's MSP CA root and the host name <node>
-                                                        (`-verify_hostname <node> -CAfile <root>`): "verify OK" or the openssl verify error.
+                                                        (`-verify_hostname <node> -CAfile <root>`): "verify OK" or the openssl verify error. Every line ends with the sha256 fingerprint of the presented cert (rollback proof: it equals the restored cert's).
 Exit code 0 only if every checked listener carries all names.
 """
 import os, socket, subprocess, sys, time
@@ -26,6 +26,11 @@ def names(party, node):
 def san(pem):
     r = subprocess.run(["openssl", "x509", "-noout", "-ext", "subjectAltName"], input=pem, capture_output=True, text=True)
     return [x.strip()[4:] for line in r.stdout.splitlines() if "DNS:" in line for x in line.split(",")]
+
+
+def fingerprint(pem):
+    r = subprocess.run(["openssl", "x509", "-noout", "-fingerprint", "-sha256"], input=pem, capture_output=True, text=True)
+    return r.stdout.strip().split("=", 1)[-1]
 
 
 def check(pem, party, node):
@@ -63,16 +68,16 @@ def presented(party, node, svc, port, lport, kube, cafile=None):
             pf.kill()
 
 
-def report(party, node, miss, have, verify=None):
+def report(party, node, miss, have, verify=None, fp=""):
     v = "" if verify is None else (" | verify OK" if verify.startswith("Verify return code: 0") else f" | VERIFY FAILED ({verify})")
-    print(f"{party} {node}: SAN {have} {'OK' if not miss else 'MISSING ' + str(miss)}{v}")
+    print(f"{party} {node}: SAN {have} {'OK' if not miss else 'MISSING ' + str(miss)}{v} | sha256 {fp}")
     return not miss and (verify is None or verify.startswith("Verify return code: 0"))
 
 
 def main(a):
     if len(a) == 4 and a[0] == "file":
         pem = open(a[1]).read()
-        return 0 if report(a[2], a[3], check(pem, a[2], a[3]), san(pem)) else 1
+        return 0 if report(a[2], a[3], check(pem, a[2], a[3]), san(pem), None, fingerprint(pem)) else 1
     if a and a[0] == "live":
         kdir = "/dev/shm/swap-fabric"
         if "--kube-dir" in a:
@@ -92,7 +97,7 @@ def main(a):
                     print(f"{party} {node}: {err}")
                     ok = False
                 else:
-                    ok &= report(party, node, check(pem, party, node), san(pem), err if caf else None)
+                    ok &= report(party, node, check(pem, party, node), san(pem), err if caf else None, fingerprint(pem))
         left = subprocess.run(["pgrep", "-fc", "kubectl.*port-forward.*rdbi-p2p"], capture_output=True, text=True).stdout.strip() or "0"
         print("port-forwards:", "none left" if left == "0" else left)
         return 0 if ok else 1

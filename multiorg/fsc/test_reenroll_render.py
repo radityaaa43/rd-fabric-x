@@ -102,9 +102,15 @@ class Job(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.job(mode="delete")
 
-    def test_remove_prev_job_mounts_no_identity(self):
-        spec = by(self.job(mode="remove-prev"), "Job")["spec"]["template"]["spec"]
-        self.assertEqual(sorted(v["name"] for v in spec["volumes"]), ["work"])
+    def test_remove_prev_and_restore_prev_jobs_mount_no_identity(self):
+        for mode in ("remove-prev", "restore-prev"):
+            spec = by(self.job(mode=mode), "Job")["spec"]["template"]["spec"]
+            self.assertEqual(sorted(v["name"] for v in spec["volumes"]), ["work"], mode)
+            self.assertEqual(spec["containers"][0]["command"][-1], "--" + mode)
+
+    def test_restore_prev_dry_run_is_two_flags(self):
+        c = by(self.job(mode="restore-prev-dry-run"), "Job")["spec"]["template"]["spec"]["containers"][0]["command"]
+        self.assertEqual(c[-2:], ["--restore-prev", "--dry-run"])
 
     def test_every_node_of_every_party(self):
         for p, nodes in NODES.items():
