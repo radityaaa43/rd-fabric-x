@@ -352,7 +352,8 @@ def gateway(n):
          "volumeMounts": [{"name": "opa", "mountPath": "/config", "readOnly": True},
                           {"name": "sink-token", "mountPath": "/sink-token", "readOnly": True}]},
         {"name": "fxapi", "image": IMAGE, "command": ["rdbi-driver", "serve", node, "127.0.0.1:8080"],
-         "env": [{"name": "HOME", "value": os.path.dirname(T)}, {"name": "FXGW_TLS", "value": "/mtls"}],
+         "env": [{"name": "HOME", "value": os.path.dirname(T)}, {"name": "FXGW_TLS", "value": "/mtls"},
+                 {"name": "RDBI_REDELIVER_INTERVAL", "value": "60s"}],  # report redelivery tick (redeliver.go); "0" turns it off
          # fxapi listens on 127.0.0.1 only (behind Envoy), which a kubelet tcpSocket probe on the pod IP cannot reach
          "readinessProbe": {"exec": {"command": ["bash", "-c", ": >/dev/tcp/127.0.0.1/8080"]}, "periodSeconds": 5},
          "resources": {"requests": {"cpu": "10m", "memory": "32Mi"}, "limits": {"memory": "256Mi"}},
