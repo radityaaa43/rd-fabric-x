@@ -63,5 +63,5 @@ jobs:
       - name: fsc-reenroll helper (Go)
         working-directory: multiorg/fsc/reenroll
         run: go vet ./... && go test ./...
-      - name: multiorg/fsc incl. the REAL fabric-ca tests (missing docker/client fails, no skip)
-        run: python3 -m pip install pyyaml==6.0.1 && REQUIRE_REAL_CA=1 python3 -m unittest discover -s multiorg/fsc
+      - name: multiorg/fsc incl. the REAL fabric-ca tests and the sqlite3 script tests (missing docker/client/sqlite3 fails, no skip)
+        run: (command -v sqlite3 || sudo apt-get install -y -qq sqlite3) && sqlite3 -version && python3 -m pip install pyyaml==6.0.1 && REQUIRE_REAL_CA=1 REQUIRE_SQLITE=1 python3 -m unittest discover -s multiorg/fsc
