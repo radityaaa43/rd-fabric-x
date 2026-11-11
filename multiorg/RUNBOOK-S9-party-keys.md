@@ -63,6 +63,8 @@ The org sends the directory and tells `lead` the sha256 of `MANIFEST.sha256` on 
 - Lead classification: ACCEPTED interim shortcut. One operator host holds each org's keys on tmpfs, transiently, between enroll and Secret create. The recorded decentralization gap is the per-bank operator host. This text goes into the GO request.
 - PVC per CA: qa PRE checks disk-attach capacity on the target nodes and the storage class (`alicloud-essd-wffc`); if there is no slot, stop before apply.
 - The four live Roles lack `pods/portforward`: updating them is GO line B-F0 (rollback = remove the rule).
+- Secrets never go on a command line (qa finding): the admin password and each role's enrollment secret reach `fabric-ca-client` only through its environment (`FABRIC_CA_CLIENT_URL`; `/proc/<pid>/environ` is readable by the same uid only, `cmdline` is world-readable). `register` omits `--id.secret`; the server-generated `Password:` is read from stdout. A failing command prints only its first 3 argv words plus stderr with every known secret replaced by `***`. [unverified live] that the real client honours `FABRIC_CA_CLIENT_URL` and prints that password; the window-start throwaway enroll settles it, and the stub tests cannot.
+- `enroll.py init` leaves `admin.pass` in W until `enroll` runs. If `enroll` never runs, shred W by hand: `find W -type f -exec shred -u {} +; rm -r W`.
 - The CA key and registry sit on a PVC, not in a Secret: `party-admin` cannot read them; the cluster admin and snapshots can.
 - `fca-org<N>` runs without TLS in-namespace (`--tls.enabled=false`; port-forward only). TLS is S13.
 - S10 builds the genesis with `createBlock` only: its block is not byte-identical to the one `generate` writes (cause unverified).

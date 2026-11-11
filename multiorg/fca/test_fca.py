@@ -117,5 +117,94 @@ class Enroll(unittest.TestCase):
         self.assertEqual(enroll.check_target("bank-c", "rd-fabricx-bank-c"), 4)
 
 
+FCA_STUB = r"""#!/bin/sh
+# stub fabric-ca-client: records argv and the URL env; register prints a generated password like the real client
+echo "$@" >> "$STUB_LOG/argv.log"
+echo "$FABRIC_CA_CLIENT_URL" >> "$STUB_LOG/url.log"
+case "$1" in
+  register) echo "Password: ROLESECRET$(echo "$@" | sed 's/.*--id.name \([a-z0-9-]*\).*/\1/')"; exit 0;;
+esac
+if [ -n "$STUB_FAIL" ] && echo "$@" | grep -q "$STUB_FAIL"; then
+  echo "Error: Response from server: bad credentials for $FABRIC_CA_CLIENT_URL" >&2; exit 1
+fi
+M=""; prev=""; for a in "$@"; do [ "$prev" = "-M" ] && M="$a"; prev="$a"; done
+case "$M" in
+  */tls) sub=tlscacerts; k=def_sk;; *) sub=cacerts; k=abc_sk;;
+esac
+mkdir -p "$M/signcerts" "$M/$sub" "$M/keystore"
+printf -- '-----BEGIN CERTIFICATE-----\nMII\n-----END CERTIFICATE-----\n' > "$M/signcerts/cert.pem"
+printf -- '-----BEGIN CERTIFICATE-----\nMII\n-----END CERTIFICATE-----\n' > "$M/$sub/ca.pem"
+printf -- '-----BEGIN PRIVATE KEY-----\nAA\n-----END PRIVATE KEY-----\n' > "$M/keystore/$k"
+"""
+KUBECTL_STUB = "#!/bin/sh\necho \"$@\" >> \"$STUB_LOG/kubectl.log\"\ncase \"$*\" in *\" -f -\"*) cat >> \"$STUB_LOG/kubectl-stdin.log\";; esac\nexit 0\n"
+
+
+class EnrollFlow(unittest.TestCase):
+    """enroll.init / enroll.enroll against stub binaries: where do the secrets travel, and what does a failure print"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.bin, self.log = os.path.join(self.tmp.name, "bin"), os.path.join(self.tmp.name, "log")
+        os.makedirs(self.bin)
+        os.makedirs(self.log)
+        for name, body in (("fabric-ca-client", FCA_STUB), ("kubectl", KUBECTL_STUB)):
+            p = os.path.join(self.bin, name)
+            with open(p, "w") as f:
+                f.write(body)
+            os.chmod(p, 0o755)
+        self.env = {k: os.environ.get(k) for k in ("PATH", "STUB_LOG", "STUB_FAIL")}
+        os.environ["PATH"] = self.bin + ":" + os.environ["PATH"]
+        os.environ["STUB_LOG"] = self.log
+        os.environ.pop("STUB_FAIL", None)
+        self.work = tempfile.mkdtemp(dir="/dev/shm")
+        os.rmdir(self.work)
+        self.out = os.path.join(self.tmp.name, "exchange", "org2")
+
+    def tearDown(self):
+        for k, v in self.env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        if os.path.exists(self.work):
+            enroll.destroy(self.work)
+        self.tmp.cleanup()
+
+    def logtext(self, name):
+        p = os.path.join(self.log, name)
+        return open(p).read() if os.path.exists(p) else ""
+
+    def test_secrets_never_in_argv(self):
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        pw = open(os.path.join(self.work, "admin.pass")).read().strip()
+        enroll.enroll("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, self.out)
+        argv = self.logtext("argv.log") + self.logtext("kubectl.log")
+        self.assertNotIn(pw, argv)
+        self.assertNotIn("ROLESECRET", argv)
+        self.assertNotIn("--id.secret", argv)
+        self.assertNotIn("@localhost", argv)                       # no user:pass@host URL on a command line
+        self.assertIn(f"admin:{pw}@localhost", self.logtext("url.log"))   # it travels in the env instead
+        self.assertIn("ROLESECRETrouter-2", self.logtext("url.log"))
+        self.assertFalse(os.path.exists(self.work))                # destroyed
+        self.assertEqual(check_exchange.problems(self.out, 2), [])
+
+    def test_failure_text_has_no_secret(self):
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        pw = open(os.path.join(self.work, "admin.pass")).read().strip()
+        os.environ["STUB_FAIL"] = "tls"                            # fails on the first tls enrollment, after register
+        with self.assertRaises(SystemExit) as cm:
+            enroll.enroll("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, self.out)
+        msg = str(cm.exception.code)
+        for secret in (pw, "ROLESECRETrouter-2"):
+            self.assertNotIn(secret, msg)
+        self.assertIn("fabric-ca-client", msg)
+        self.assertIn("***", msg)
+        self.assertFalse(os.path.exists(self.work))                # keys destroyed on error too
+
+    def test_scrub_covers_every_secret(self):
+        self.assertEqual(enroll.scrub("a S1 b S2 c", ["S1", "S2"]), "a *** b *** c")
+        self.assertEqual(enroll.scrub("x", []), "x")
+
+
 if __name__ == "__main__":
     unittest.main()
