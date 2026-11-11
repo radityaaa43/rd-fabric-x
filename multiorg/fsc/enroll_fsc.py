@@ -70,8 +70,9 @@ def make(party, ns, kubeconfig, ca_url, work, exchange, out, generation=""):
             secrets.append(m.group(1))
             return m.group(1)
 
-        def msp(who, pwd, d):
-            enroll.sh("fabric-ca-client", "enroll", "-M", d, env=creds(who, pwd), secrets=secrets)
+        def msp(who, pwd, d, host=None):
+            # host: the names peers dial. The FSC websocket p2p listener serves THIS identity cert (not fsc/tls.crt), so without --csr.hosts the SAN is the enrolling host's hostname
+            enroll.sh("fabric-ca-client", "enroll", "-M", d, *(["--csr.hosts", host] if host else []), env=creds(who, pwd), secrets=secrets)
             return (enroll.read(enroll.first(f"{d}/signcerts/*.pem")), enroll.read(enroll.first(f"{d}/keystore/*_sk")), enroll.read(enroll.first(f"{d}/cacerts/*.pem")))
 
         def tls(who, pwd, d, host):
@@ -85,7 +86,7 @@ def make(party, ns, kubeconfig, ca_url, work, exchange, out, generation=""):
             w = f"{work}/{node}"
             who = f"{node}-fsc{sfx}"
             pwd = register(who)
-            cert, key, _ = msp(who, pwd, f"{w}/fsc/msp")
+            cert, key, _ = msp(who, pwd, f"{w}/fsc/msp", host)
             own[f"{o}/fsc/cert.pem"], own[f"{o}/fsc/key.pem"] = cert, key
             public[f"fsc/{node}.pem"] = cert
             cert, key, ca = tls(who, pwd, f"{w}/fsc/tls", host)
