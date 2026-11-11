@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -50,22 +51,34 @@ func redeliverInterval(s string) (time.Duration, error) {
 
 // redeliverFuncs are the effects of the loop, so a test can replace BI.
 type redeliverFuncs struct {
-	probe      func() error           // nil when BI answers through its gateway
-	deliver    func(tx string) string // the `op: report` path: BI's outcome or "not delivered: ..."
-	deliverAll func() error           // the startup pass: the report view with an empty TxID
+	probe      func() error             // nil when BI answers through its gateway
+	deliver    func(tx string) string   // the `op: report` path: BI's outcome or "not delivered: ..."
+	deliverAll func() ([]string, error) // the startup pass: the report view with an empty TxID
 	logf       func(string, ...any)
 }
 
 type redeliverer struct {
 	f       redeliverFuncs
 	mu      sync.Mutex
-	due     map[string]struct{}
-	startup bool // the startup pass has not run yet
+	due     map[string]*dueTx
+	seq     uint64 // arrival order: reports must reach BI in causal order, and arrival is the best proxy we have
+	startup bool   // the startup pass has not run yet
+	off     bool   // the loop is disabled: keep no state
 }
 
 func newRedeliverer(f redeliverFuncs, startup bool) *redeliverer {
-	return &redeliverer{f: f, due: map[string]struct{}{}, startup: startup}
+	return &redeliverer{f: f, due: map[string]*dueTx{}, startup: startup}
 }
+
+// dueTx is one transaction whose report BI has not recorded yet.
+type dueTx struct {
+	seq     uint64
+	refused int // times BI answered but did not record it
+}
+
+// maxRefusals bounds the retries of a report BI keeps refusing (a refusal for a missing earlier report is
+// transient, a forged or altered one never succeeds): after that the tx is dropped and only `op: report` retries it.
+const maxRefusals = 5
 
 func delivered(outcome string) bool { return outcome == rep.Recorded || outcome == rep.AlreadyRecorded }
 
@@ -73,11 +86,23 @@ func delivered(outcome string) bool { return outcome == rep.Recorded || outcome 
 func (r *redeliverer) note(tx, outcome string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.off {
+		return
+	}
 	if delivered(outcome) {
 		delete(r.due, tx)
-	} else {
-		r.due[tx] = struct{}{}
+	} else if r.due[tx] == nil {
+		r.seq++
+		r.due[tx] = &dueTx{seq: r.seq}
 	}
+}
+
+// disable stops the due set from growing when the loop is off (RDBI_REDELIVER_INTERVAL=0).
+func (r *redeliverer) disable() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.off = true
+	r.due = map[string]*dueTx{}
 }
 
 func (r *redeliverer) size() int {
@@ -91,38 +116,85 @@ func (r *redeliverer) size() int {
 func (r *redeliverer) tick() {
 	r.mu.Lock()
 	startup := r.startup
-	ids := make([]string, 0, len(r.due))
-	for tx := range r.due {
-		ids = append(ids, tx)
-	}
 	r.mu.Unlock()
+	ids := r.dueIDs()
 	if !startup && len(ids) == 0 {
 		return
 	}
-	sort.Strings(ids)
 	if err := r.f.probe(); err != nil {
 		r.f.logf("redeliver: BI not reachable (%v), %d due, skipping tick", err, len(ids))
 		return
 	}
 	if startup {
-		if err := r.f.deliverAll(); err != nil {
+		refused, err := r.f.deliverAll()
+		if err != nil {
 			r.f.logf("redeliver: startup pass: %v", err)
 			return
 		}
 		r.mu.Lock()
 		r.startup = false
 		r.mu.Unlock()
-		r.f.logf("redeliver: startup pass done")
+		r.f.logf("redeliver: startup pass done, %d refused by BI (kept due)", len(refused))
+		sort.Strings(refused)
+		for _, tx := range refused {
+			r.note(tx, "refused")
+		}
+		ids = r.dueIDs()
 	}
 	for _, tx := range ids {
 		out := r.f.deliver(tx)
 		r.note(tx, out)
-		if !delivered(out) {
+		switch {
+		case delivered(out):
+			r.f.logf("redeliver %.12s: %s", tx, out)
+		case strings.HasPrefix(out, "not delivered"): // transport failure: BI is gone again, stop this tick
 			r.f.logf("redeliver %.12s: %s, stopping tick", tx, out)
 			return
+		default: // BI answered but did not record it (e.g. an earlier report is missing): count it, the others go on
+			if n, dropped := r.refuse(tx); dropped {
+				r.f.logf("redeliver %.12s: refused by BI %d times (%s), giving up; `op: report` retries it", tx, n, out)
+			} else {
+				r.f.logf("redeliver %.12s: refused by BI (%s), attempt %d of %d", tx, out, n, maxRefusals)
+			}
 		}
-		r.f.logf("redeliver %.12s: %s", tx, out)
 	}
+}
+
+func (r *redeliverer) dueIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make([]string, 0, len(r.due))
+	for tx := range r.due {
+		ids = append(ids, tx)
+	}
+	sort.Slice(ids, func(i, j int) bool { return r.due[ids[i]].seq < r.due[ids[j]].seq })
+	return ids
+}
+
+// refuse counts a refusal by BI; it reports whether the tx was dropped for good.
+func (r *redeliverer) refuse(tx string) (n int, dropped bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	e := r.due[tx]
+	if e == nil {
+		return 0, false
+	}
+	e.refused++
+	if e.refused >= maxRefusals {
+		delete(r.due, tx)
+		return e.refused, true
+	}
+	return e.refused, false
+}
+
+// safeTick contains a panic: the loop is a goroutine without a request to recover it, and a panic would kill fxapi.
+func (r *redeliverer) safeTick() {
+	defer func() {
+		if p := recover(); p != nil {
+			r.f.logf("redeliver: panic in tick: %v", p)
+		}
+	}()
+	r.tick()
 }
 
 // loop ticks every `every` (and once at once) until ctx ends; every <= 0 disables it.
@@ -130,7 +202,7 @@ func (r *redeliverer) loop(ctx context.Context, every time.Duration) {
 	if every <= 0 {
 		return
 	}
-	r.tick()
+	r.safeTick()
 	t := time.NewTicker(every)
 	defer t.Stop()
 	for {
@@ -138,7 +210,7 @@ func (r *redeliverer) loop(ctx context.Context, every time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			r.tick()
+			r.safeTick()
 		}
 	}
 }
@@ -150,23 +222,22 @@ func newRealRedeliverer(startup bool) *redeliverer {
 	return newRedeliverer(redeliverFuncs{
 		probe:   probeBI,
 		deliver: deliver,
-		deliverAll: func() error {
+		deliverAll: func() ([]string, error) {
 			o, err := tryCall(party, "report", &rep.Report{})
 			if err != nil {
-				return fmt.Errorf("not delivered: %s", short(err))
+				return nil, fmt.Errorf("not delivered: %s", short(err))
 			}
-			res := map[string]string{}
-			jsonUnmarshal(o.([]byte), &res)
-			refused := 0
-			for _, out := range res {
+			res, err := reportOutcomes(o)
+			if err != nil {
+				return nil, fmt.Errorf("not delivered: %v", err)
+			}
+			var refused []string
+			for tx, out := range res {
 				if !delivered(out) {
-					refused++
+					refused = append(refused, tx)
 				}
 			}
-			if refused > 0 {
-				return fmt.Errorf("BI refused %d of %d reports", refused, len(res))
-			}
-			return nil
+			return refused, nil
 		},
 		logf: func(format string, a ...any) { fmt.Fprintf(os.Stderr, format+"\n", a...) },
 	}, startup)
@@ -187,4 +258,17 @@ func probeBI() error {
 		return fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// reportOutcomes decodes the report view's answer (per tx: BI's outcome) without trusting its type.
+func reportOutcomes(o any) (map[string]string, error) {
+	b, ok := o.([]byte)
+	if !ok {
+		return nil, fmt.Errorf("report view returned %T, want JSON bytes", o)
+	}
+	res := map[string]string{}
+	if err := json.Unmarshal(b, &res); err != nil {
+		return nil, fmt.Errorf("report view answer: %w", err)
+	}
+	return res, nil
 }

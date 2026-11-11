@@ -93,6 +93,9 @@ func serve(args []string) {
 	every, err := redeliverInterval(os.Getenv(envRedeliver))
 	must(err, "redelivery interval")
 	pending = newRealRedeliverer(party != bi)
+	if every <= 0 {
+		pending.disable()
+	}
 	go pending.loop(context.Background(), every)
 	srv := &http.Server{Addr: args[1], Handler: http.HandlerFunc(handle), ReadHeaderTimeout: 10 * time.Second}
 	must(srv.ListenAndServe(), "listen "+args[1])
@@ -288,8 +291,10 @@ func deliver(tx string) string {
 	if err != nil {
 		return "not delivered: " + short(err)
 	}
-	res := map[string]string{}
-	jsonUnmarshal(o.([]byte), &res)
+	res, err := reportOutcomes(o)
+	if err != nil {
+		return "not delivered: " + err.Error()
+	}
 	return res[tx]
 }
 
