@@ -2,7 +2,7 @@
 """Print the FSC pod of one org for its own namespace (fabricx PLAN S13 piece 3; stdout only, nothing is applied, no cluster, no key read).
 
 usage: render.py bi|bank-a|bank-b|bank-c --templates <live dir with <node>/{core.yaml,role,policy.env}> --fsc-exchange <dir with org1..org4 from enroll_fsc.py --out>
-                 --tls-exchange <dir with org<N>/msp/tlscacerts> --image repo@sha256:HEX --p2p-ips FILE [--central-keys FILE] [--allow-uncovered]
+                 --tls-exchange <dir with org<N>/msp/tlscacerts> --image repo@sha256:HEX --p2p-ips FILE --bootstrap-cert FILE [--central-keys FILE] [--allow-uncovered]
                  [--storage-class SC] [--zone Z] [--p2p-lb-acl acl-ID --p2p-lb-range <ipv4>/32 ...]
 Objects (apply order): ConfigMap rdbi-public (every node's public certs + the TLS CA bundle), ConfigMaps rdbi-core-<node> (multiorg/fsc/core_rewrite.py output),
 Services <node> (grpc/p2p/web; the node TLS certificates carry the node name), PVC rdbi-<pod>-state, NetworkPolicy rdbi-traffic, Deployment rdbi-<pod> (the org's
@@ -51,7 +51,7 @@ def flat(rel):
     return rel.replace("/", "__")
 
 
-def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage_class=None, zone=None, central_keys=(), allow_uncovered=False, p2p_lb=None, home=None):
+def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage_class=None, zone=None, central_keys=(), allow_uncovered=False, p2p_lb=None, home=None, bootstrap_cert=None):
     if party not in PARTY_N:
         die(f"party {party!r} must be one of {', '.join(PARTY_N)}")
     if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image or ""):
@@ -100,6 +100,9 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
         if not glob.glob(f"{tls_exchange}/org{m}/msp/tlscacerts/*.pem"):
             die(f"{tls_exchange}/org{m}/msp/tlscacerts/*.pem is missing")
     public["ca-bundle.pem"] = bundle
+    if not bootstrap_cert or not os.path.isfile(bootstrap_cert):
+        die("--bootstrap-cert is required: the core's resolver lib-p2p-bootstrap-node names a PUBLIC cert file that the node reads at start")
+    public["fsc__lib-p2p-bootstrap-node.pem"] = open(bootstrap_cert).read()
 
     # projected "own" volume: this pod's Secret + the existing endorser Secret + the org CA cert
     own_items = [{"key": flat(f"own/{x}/{rel}"), "path": f"{x}/{rel}"} for x in nodes for rel in enroll_fsc.own_files(x)]
@@ -185,7 +188,7 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
 if __name__ == "__main__":
     p = argparse.ArgumentParser(usage=__doc__, allow_abbrev=False)
     p.add_argument("party")
-    for o in ("templates", "fsc-exchange", "tls-exchange", "image", "p2p-ips", "central-keys", "storage-class", "zone", "p2p-lb-acl"):
+    for o in ("templates", "fsc-exchange", "tls-exchange", "image", "p2p-ips", "central-keys", "storage-class", "zone", "p2p-lb-acl", "bootstrap-cert"):
         p.add_argument(f"--{o}")
     p.add_argument("--p2p-lb-range", action="append", default=[])
     p.add_argument("--allow-uncovered", action="store_true")
@@ -195,4 +198,4 @@ if __name__ == "__main__":
     ips = arma.load_ips(a.p2p_ips) if a.p2p_ips else None
     central = json.load(open(a.central_keys)) if a.central_keys else []
     lb = {"acl_id": a.p2p_lb_acl, "ranges": a.p2p_lb_range} if a.p2p_lb_acl else None
-    sys.stdout.write(render(a.party, a.templates, a.fsc_exchange, a.tls_exchange, a.image, ips, a.storage_class, a.zone, central, a.allow_uncovered, lb))
+    sys.stdout.write(render(a.party, a.templates, a.fsc_exchange, a.tls_exchange, a.image, ips, a.storage_class, a.zone, central, a.allow_uncovered, lb, bootstrap_cert=a.bootstrap_cert))
