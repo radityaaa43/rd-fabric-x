@@ -27,7 +27,7 @@ jobs:
           cache-dependency-path: panurus/integration/go.sum
       - name: Patch Panurus and FSC, copy rdbi
         run: |
-          (cd panurus/integration && go get gopkg.in/yaml.v3@v3.0.1)
+          (cd panurus/integration && go get gopkg.in/yaml.v3@v3.0.1 && go mod download github.com/hyperledger-labs/fabric-smart-client)
           make -C panurus-itest SRC="$PWD/panurus" WORK="$PWD" fsc-patch panurus-patch
           mkdir -p panurus/integration/token/fungible/rdbi
           cp -r panurus-itest/rdbi/. panurus/integration/token/fungible/rdbi/
