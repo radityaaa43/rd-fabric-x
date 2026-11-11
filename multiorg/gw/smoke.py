@@ -34,7 +34,7 @@ def main():
             sys.exit("openssl failed: " + r.stderr[:200])
         open(f"{d}/ca/ca.crt", "w").write(open(f"{d}/mtls/tls.crt").read())
         subprocess.run(["chmod", "-R", "a+rX", d])
-        docs = list(yaml.safe_load_all(gw.render("bi", a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, cert, a.gw_ips, ["192.0.2.10/32"])))
+        docs = list(yaml.safe_load_all(gw.render("bi", a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, cert, a.gw_ips)))
         cm = {x["metadata"]["name"]: x for x in docs if x["kind"] == "ConfigMap"}
         open(f"{d}/envoy.yaml", "w").write(cm["fx-gw-1-envoy"]["data"]["envoy.yaml"])
         open(f"{d}/opa.yaml", "w").write(cm["fx-gw-1-opa"]["data"]["opa.yaml"])

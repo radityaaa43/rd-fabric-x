@@ -4,22 +4,19 @@
 usage: render.py bi|bank-a|bank-b|bank-c --templates <live dir with <node>/client-config.yaml (+ issuer-identity.bin for bi)>
                  --image repo@sha256:HEX (rdbi-node: fxapi) --envoy-image repo@sha256:HEX --opa-image repo@sha256:HEX
                  --opa-config FILE (opa.yaml + the PUBLIC `keys:` block, ~/.opa-keys/opa-config.yaml) --gw-cert FILE (public cert of identity <node>-gw)
-                 --gw-ips FILE ({cluster1:{N: addr}, cluster2:{N: addr}}: address of each gateway for peers in the OTHER cluster) --client-cidr <ipv4>/32 ...
+                 --gw-ips FILE ({cluster1:{N: addr}, cluster2:{N: addr}}: address of each gateway for peers in the OTHER cluster)
                  [--lb-acl acl-ID --lb-range <ipv4>/32 ...]
 Objects: ConfigMaps fx-gw-<N>-envoy, fx-gw-<N>-opa, fx-gw-<N>-client (client-config.yaml of the gateway's node, gateway cert, issuer-identity.bin for bi only),
-Services fx-gw-<N> (ClusterIP 8443) and one ExternalName `fx-gw-<M>` per same-cluster peer (the driver dials https://fx-gw-<M>:8443/, serve.go:43), NetworkPolicy fx-gw-<N>,
+Services fx-gw-<N> (ClusterIP 8443), fx-gw-<N>-ext (NodePort, eTP Cluster, cluster-1 parties only: the Lensa path, like zeto bank-gw-<N>-ext) and one ExternalName `fx-gw-<M>` per same-cluster peer (the driver dials https://fx-gw-<M>:8443/, serve.go:43), NetworkPolicy fx-gw-<N> (ingress 8443 from any source, like zeto bank-gw-ingress: mTLS + OPA are the control),
 Deployment fx-gw-<N> (envoy :8443 mTLS + ext_authz to OPA 127.0.0.1:9191, OPA bundles from the SAME party's zeto bundle-server read side only, fxapi `rdbi-driver serve <node>`).
 hostAliases carry the cross-cluster peers. The LoadBalancer Service fx-gw-<N>-lb exists only with --lb-acl (existing ACL id, /32 ranges only).
 NOT rendered, custody step (multiorg/gw/make_secrets.py): Secrets fx-gw-<N>-server (tls.crt, tls.key from the org's own TLS CA), fx-gw-<N>-client-ca (ca.crt: bank-gw-ca-<N> + the 4 TLS CAs, public),
 fx-gw-<N>-peer (tls.crt, tls.key of identity fx-gw-<N>-peer), fx-gw-<N>-client (gw.key of identity <node>-gw).
 """
-import argparse, base64, importlib.util, os, re, sys
+import argparse, base64, os, re, sys
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-_spec = importlib.util.spec_from_file_location("arma_render", os.path.join(os.path.dirname(HERE), "arma", "render.py"))
-arma = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(arma)
 
 PARTY_N = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
 NODE = {"bi": "issuer", "bank-a": "bank2", "bank-b": "bank3", "bank-c": "bank4"}
@@ -88,14 +85,12 @@ def opa_config_for(path, party):
     return yaml.safe_dump(cfg, sort_keys=False)
 
 
-def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert, gw_ips, client_cidrs, lb=None):
+def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert, gw_ips, lb=None):
     if party not in PARTY_N:
         die(f"party {party!r} must be one of {', '.join(PARTY_N)}")
     for what, v in (("--image", image), ("--envoy-image", envoy_image), ("--opa-image", opa_image)):
         if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", v or ""):
             die(f"{what} must be pinned by digest (repo@sha256:<64 hex>)")
-    if not client_cidrs or any(not re.fullmatch(HOST32, c) for c in client_cidrs):
-        die("--client-cidr is required: one or more <ipv4>/32 (the Lensa source; nothing wider, no default)")
     n, node, ns, cluster, name = PARTY_N[party], NODE[party], f"rd-fabricx-{party}", CLUSTER[party], f"fx-gw-{PARTY_N[party]}"
     pl = {"app.kubernetes.io/name": name}
     meta = lambda nm, extra=None: {"name": nm, "namespace": ns, "labels": {**LABELS, **(extra or {})}}
@@ -173,23 +168,22 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
         docs.append({"apiVersion": "v1", "kind": "Service", "metadata": meta(f"fx-gw-{m}"),
                      "spec": {"type": "ExternalName", "externalName": f"fx-gw-{m}.rd-fabricx-{same[m]}.svc.cluster.local"}})
 
-    src = [{"namespaceSelector": {"matchLabels": LABELS},
-            "podSelector": {"matchExpressions": [{"key": "app.kubernetes.io/name", "operator": "In", "values": [f"fx-gw-{m}" for m in PARTY_N.values()]}]}},
-           {"ipBlock": {"cidr": arma.PEER_EGRESS[cluster]}}] + [{"ipBlock": {"cidr": c}} for c in client_cidrs]
+    if cluster == "cluster1":   # the Lensa path, mirror of zeto bank-gw-<N>-ext (NodePort eTP Cluster; the port is allocated by Kubernetes)
+        docs.append({"apiVersion": "v1", "kind": "Service", "metadata": meta(f"{name}-ext", pl),
+                     "spec": {"type": "NodePort", "externalTrafficPolicy": "Cluster", "selector": pl, "ports": [{"name": "fxapi", "port": 8443, "targetPort": 8443, "protocol": "TCP"}]}})
     if lb:
         acl, ranges = lb.get("acl_id"), lb.get("ranges") or []
         if not re.fullmatch(r"acl-[a-z0-9]+", acl or ""):
             die("--lb-acl must be an EXISTING access control list id (acl-...): no LB without an ACL")
         if not ranges or any(not re.fullmatch(HOST32, r) for r in ranges):
             die("--lb-range must be one or more <ipv4>/32 (nothing wider)")
-        src.append({"ipBlock": {"cidr": arma.CLB_HEALTH}})   # CLB health check (backend-type eni); the CLB ACL stays the first filter
         docs.append({"apiVersion": "v1", "kind": "Service",
                      "metadata": {**meta(f"{name}-lb", pl), "annotations": {A + "acl-status": "on", A + "acl-id": acl, A + "acl-type": "white", A + "address-type": "internet", A + "scheduler": "wrr",
                                                                          "service.beta.kubernetes.io/backend-type": "eni"}},
                      "spec": {"type": "LoadBalancer", "externalTrafficPolicy": "Cluster", "loadBalancerSourceRanges": ranges, "selector": pl,
                               "ports": [{"name": "fxapi", "port": 8443, "targetPort": 8443, "protocol": "TCP"}]}})
     docs.append({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(name),
-                 "spec": {"podSelector": {"matchLabels": pl}, "policyTypes": ["Ingress"], "ingress": [{"from": src, "ports": [{"protocol": "TCP", "port": 8443}]}]}})
+                 "spec": {"podSelector": {"matchLabels": pl}, "policyTypes": ["Ingress"], "ingress": [{"ports": [{"protocol": "TCP", "port": 8443}]}]}})
     return yaml.safe_dump_all(docs, sort_keys=False)
 
 
@@ -199,14 +193,13 @@ def main():
     ap.add_argument("party")
     for o in ("templates", "image", "envoy-image", "opa-image", "opa-config", "gw-cert", "gw-ips", "lb-acl"):
         ap.add_argument(f"--{o}")
-    ap.add_argument("--client-cidr", action="append", default=[])
     ap.add_argument("--lb-range", action="append", default=[])
     a = ap.parse_args()
     for o in ("templates", "image", "envoy_image", "opa_image", "opa_config", "gw_cert", "gw_ips"):
         if not getattr(a, o):
             die(f"--{o.replace('_', '-')} is required")
     lb = {"acl_id": a.lb_acl, "ranges": a.lb_range} if a.lb_acl else None
-    sys.stdout.write(render(a.party, a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, a.gw_cert, a.gw_ips, a.client_cidr, lb))
+    sys.stdout.write(render(a.party, a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, a.gw_cert, a.gw_ips, lb))
 
 
 if __name__ == "__main__":

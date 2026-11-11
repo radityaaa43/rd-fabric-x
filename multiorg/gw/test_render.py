@@ -69,7 +69,7 @@ def make_inputs(root):
 
 def build(root, party, **kw):
     a = dict(templates=f"{root}/live", image=IMG, envoy_image=ENVOY, opa_image=OPA, opa_config=f"{root}/opa-config.yaml", gw_cert=f"{root}/gw.pem",
-             gw_ips=f"{root}/gw-ips.yaml", client_cidrs=["192.0.2.10/32"])
+             gw_ips=f"{root}/gw-ips.yaml")
     a.update(kw)
     return list(yaml.safe_load_all(render.render(party, **a)))
 
@@ -109,7 +109,7 @@ class GwRender(unittest.TestCase):
             with self.assertRaises(SystemExit):
                 build(self.root, "bi", **{k: "example.io/x:latest"})
         text = render.render("bi", templates=f"{self.root}/live", image=IMG, envoy_image=ENVOY, opa_image=OPA, opa_config=f"{self.root}/opa-config.yaml",
-                             gw_cert=f"{self.root}/gw.pem", gw_ips=f"{self.root}/gw-ips.yaml", client_cidrs=["192.0.2.10/32"])
+                             gw_cert=f"{self.root}/gw.pem", gw_ips=f"{self.root}/gw-ips.yaml")
         self.assertNotIn(":latest", text)
 
     def test_envoy_forwards_verified_client_cert_to_opa(self):
@@ -231,26 +231,25 @@ class GwRender(unittest.TestCase):
         with self.assertRaises(SystemExit):
             build(self.root, "bank-c", gw_ips=f"{self.root}/short.yaml")
 
-    def test_network_policy_sources(self):
+    def test_network_policy_8443_open_like_zeto(self):
         for p, n in PARTIES.items():
             np = by(build(self.root, p), "NetworkPolicy", f"fx-gw-{n}")
             self.assertEqual(np["spec"]["policyTypes"], ["Ingress"])
             self.assertEqual(np["spec"]["podSelector"], {"matchLabels": {"app.kubernetes.io/name": f"fx-gw-{n}"}})
-            rule = np["spec"]["ingress"][0]
-            self.assertEqual(rule["ports"], [{"protocol": "TCP", "port": 8443}])
-            blocks = [f["ipBlock"]["cidr"] for f in rule["from"] if "ipBlock" in f]
-            other = "47.237.84.150/32" if p != "bank-c" else "8.215.62.92/32"
-            self.assertEqual(sorted(blocks), sorted([other, "192.0.2.10/32"]))
-            ns = [f for f in rule["from"] if "namespaceSelector" in f]
-            self.assertEqual(len(ns), 1)
-            self.assertEqual(ns[0]["namespaceSelector"], {"matchLabels": {"app.kubernetes.io/part-of": "rd-fabricx"}})
-            self.assertEqual(ns[0]["podSelector"]["matchExpressions"][0]["key"], "app.kubernetes.io/name")
-            self.assertNotIn("0.0.0.0/0", yaml.safe_dump(np))
+            self.assertEqual(np["spec"]["ingress"], [{"ports": [{"protocol": "TCP", "port": 8443}]}])   # no from-list: mTLS + OPA are the control (zeto bank-gw-ingress)
 
-    def test_client_cidrs_are_host_addresses_only_and_required(self):
-        for bad in (["0.0.0.0/0"], ["10.0.0.0/8"], []):
-            with self.assertRaises(SystemExit):
-                build(self.root, "bi", client_cidrs=bad)
+    def test_lensa_nodeport_on_cluster1_only(self):
+        for p, n in PARTIES.items():
+            ext = [d for d in build(self.root, p) if d["metadata"]["name"] == f"fx-gw-{n}-ext"]
+            if p == "bank-c":
+                self.assertEqual(ext, [])
+                continue
+            self.assertEqual(len(ext), 1)
+            sp = ext[0]["spec"]
+            self.assertEqual((sp["type"], sp["externalTrafficPolicy"]), ("NodePort", "Cluster"))
+            self.assertEqual(sp["selector"], {"app.kubernetes.io/name": f"fx-gw-{n}"})
+            self.assertEqual([(x["port"], x["targetPort"]) for x in sp["ports"]], [(8443, 8443)])
+            self.assertNotIn("nodePort", sp["ports"][0])
 
     def test_lb_only_with_existing_acl(self):
         docs = build(self.root, "bank-c", lb={"acl_id": "acl-abc123", "ranges": ["47.237.84.150/32"]})
@@ -263,8 +262,6 @@ class GwRender(unittest.TestCase):
         self.assertEqual(lb["spec"]["externalTrafficPolicy"], "Cluster")
         self.assertEqual(lb["spec"]["loadBalancerSourceRanges"], ["47.237.84.150/32"])
         self.assertEqual(lb["spec"]["ports"][0]["port"], 8443)
-        np = by(docs, "NetworkPolicy", "fx-gw-4")
-        self.assertIn("100.64.0.0/10", [f["ipBlock"]["cidr"] for f in np["spec"]["ingress"][0]["from"] if "ipBlock" in f])
         for bad in ({"acl_id": "x", "ranges": ["1.1.1.1/32"]}, {"acl_id": "acl-abc", "ranges": ["1.1.1.0/24"]}, {"acl_id": "acl-abc", "ranges": []}):
             with self.assertRaises(SystemExit):
                 build(self.root, "bank-c", lb=bad)
@@ -275,7 +272,7 @@ class GwRender(unittest.TestCase):
 
     def test_cli_prints_yaml_and_applies_nothing(self):
         r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "render.py"), "bi", "--templates", f"{self.root}/live", "--image", IMG, "--envoy-image", ENVOY, "--opa-image", OPA,
-                            "--opa-config", f"{self.root}/opa-config.yaml", "--gw-cert", f"{self.root}/gw.pem", "--gw-ips", f"{self.root}/gw-ips.yaml", "--client-cidr", "192.0.2.10/32"],
+                            "--opa-config", f"{self.root}/opa-config.yaml", "--gw-cert", f"{self.root}/gw.pem", "--gw-ips", f"{self.root}/gw-ips.yaml"],
                            capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(sum(1 for d in yaml.safe_load_all(r.stdout) if d and d["kind"] == "Deployment"), 1)

@@ -5,19 +5,21 @@ Status: PRE-STAGE. Repo-only; `render.py` prints YAML and applies nothing. Sourc
 ## Command
 ```
 python3 multiorg/gw/render.py <bi|bank-a|bank-b|bank-c> --templates ~/.fabricx-token/live --image <rdbi-node@sha256> --envoy-image <envoy@sha256> --opa-image <opa@sha256> \
-  --opa-config ~/.opa-keys/opa-config.yaml --gw-cert <public cert of identity <node>-gw> --gw-ips FILE --client-cidr <ipv4>/32 ... [--lb-acl acl-ID --lb-range <ipv4>/32 ...]
+  --opa-config ~/.opa-keys/opa-config.yaml --gw-cert <public cert of identity <node>-gw> --gw-ips FILE [--lb-acl acl-ID --lb-range <ipv4>/32 ...]
 ```
-No default for the images (digest or refusal), the OPA config (public keys only, a `PRIVATE KEY` refuses), `--gw-ips` (the address of each gateway for peers in the OTHER cluster) or `--client-cidr` (Lensa source, /32 only).
+No default for the images (digest or refusal), the OPA config (public keys only, a `PRIVATE KEY` refuses), or `--gw-ips` (the address of each gateway for peers in the OTHER cluster).
 
 ## Objects (namespace `rd-fabricx-<party>`)
-ConfigMaps `fx-gw-<N>-envoy`, `fx-gw-<N>-opa`, `fx-gw-<N>-client`; Services `fx-gw-<N>` (ClusterIP 8443) and one ExternalName `fx-gw-<M>` per same-cluster peer; NetworkPolicy `fx-gw-<N>` (ingress 8443: gateway pods of namespaces `part-of=rd-fabricx`, the other cluster's egress /32, `--client-cidr`; plus 100.64.0.0/10 only with the LB); Deployment `fx-gw-<N>` (envoy + OPA + fxapi, one pod, Recreate). LoadBalancer Service `fx-gw-<N>-lb` only with `--lb-acl` (existing ACL, eTP Cluster, `backend-type: eni`).
+ConfigMaps `fx-gw-<N>-envoy`, `fx-gw-<N>-opa`, `fx-gw-<N>-client`; Services `fx-gw-<N>` (ClusterIP 8443), `fx-gw-<N>-ext` (NodePort, eTP Cluster, cluster-1 parties only: the Lensa path, mirror of zeto `bank-gw-<N>-ext`; the node port is allocated by Kubernetes, fe reads it) and one ExternalName `fx-gw-<M>` per same-cluster peer; NetworkPolicy `fx-gw-<N>` (ingress TCP 8443 from any source, like zeto `bank-gw-ingress`: mTLS + OPA are the control, decided 2026-11-06); Deployment `fx-gw-<N>` (envoy + OPA + fxapi, one pod, Recreate). LoadBalancer Service `fx-gw-<N>-lb` only with `--lb-acl` (existing ACL, eTP Cluster, `backend-type: eni`); bank-c (cluster 2) is reached through it.
 
-## Secrets the render needs but does not create (custody step)
+## Secrets the render needs but does not create (custody step: `multiorg/gw/enroll_gw.py`)
 - `fx-gw-<N>-server`: `tls.crt`, `tls.key` (SAN `fx-gw-<N>`, from the org's OWN TLS CA).
 - `fx-gw-<N>-client-ca`: `ca.crt` = `bank-gw-ca-<N>` public CA (Lensa) + the 4 orgs' public TLS CAs (peer gateways).
 - `fx-gw-<N>-peer`: `tls.crt`, `tls.key` (identity `fx-gw-<N>-peer`, client + server EKU, SAN `fx-gw-<N>`). fxapi presents it to the other gateways (`FXGW_TLS=/peer`, `serve.go:104-117`).
 - `fx-gw-<N>-client`: `gw.key` (identity `<node>-gw`, client, org CA). Its public cert goes into the render (`--gw-cert`) and into ConfigMap `fx-gw-<N>-client`.
 - ConfigMap `rdbi-public` (S13, key `ca-bundle.pem`) is projected as the peer RootCAs and the node's TLS CA.
+
+`enroll_gw.py <party> rd-fabricx-<party> --kubeconfig K --ca-url http://localhost:7054 --work /dev/shm/W --tls-exchange <exchange-s8e> --lensa-ca <public ca.crt FILE> --out <new dir>/org<N>`: the three identities are registered at the org's own CA, one `kubectl create` of the four Secrets, public tree `gw/{<node>-gw,fx-gw-<N>,fx-gw-<N>-peer}.pem` + MANIFEST. The Lensa CA is a FILE (besu hands the public `ca.crt` of `bank-gw-ca-<N>`, sha256 quoted on both sides); this tool never reads a Secret. Rehearsed against a real fabric-ca-server 1.5.22 (throwaway CA): the tls-profile certs verify (`-purpose sslserver` and `sslclient`, both EKU), SAN `fx-gw-<N>` + `fx-gw-<N>.<ns>.svc.cluster.local`, keys match the certs.
 
 ## Why peers work without a driver change
 The driver dials `https://fx-gw-<M>:8443/` (`serve.go:43`, hardcoded). Same-cluster peers resolve through ExternalName Services, cross-cluster peers through `hostAliases` (`--gw-ips`). The SAN `fx-gw-<M>` still matches.
