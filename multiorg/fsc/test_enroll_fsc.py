@@ -82,6 +82,12 @@ class Flow(unittest.TestCase):
         self.assertEqual(s["rdbi-bank2-files"]["metadata"]["namespace"], "rd-fabricx-bank-a")
         self.assertFalse(os.path.exists(self.work))
 
+    def test_own_files_helper_matches_what_the_tool_stores(self):
+        self.run_make()
+        keys = sorted(self.secrets()["rdbi-bank2-files"]["stringData"])
+        want = sorted(enroll_fsc.secret_key(f"own/{n}/{r}") for n in ("bank2", "endorser-2") for r in enroll_fsc.own_files(n))
+        self.assertEqual(keys, want)
+
     def test_secret_key_mapping_is_reversible(self):
         self.assertEqual(enroll_fsc.secret_key("own/bank2/fsc/key.pem"), "own__bank2__fsc__key.pem")
         self.assertEqual(enroll_fsc.secret_path("own__bank2__ids__bank2__msp__keystore__priv_sk"), "own/bank2/ids/bank2/msp/keystore/priv_sk")

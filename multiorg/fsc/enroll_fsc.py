@@ -32,6 +32,14 @@ def secret_path(key):
     return key.replace("__", "/")
 
 
+def own_files(node):
+    """pod paths (below own/<node>/) of the files make() stores in the Secret for this node; the render builds its volume items from this list"""
+    f = ["fsc/cert.pem", "fsc/key.pem", "fsc/tls.crt", "fsc/tls.key", "fsc/tls-ca.crt", "fsc/admin.pem", "tls/cert.pem", "tls/key.pem"]
+    if not node.startswith("endorser-"):
+        f += [f"ids/{node}/msp/{x}" for x in ("signcerts/cert.pem", "keystore/priv_sk", "cacerts/ca.pem")]
+    return f
+
+
 def make(party, ns, kubeconfig, ca_url, work, exchange, out, generation=""):
     work = enroll.check_work(work)   # path guard first: destroy() below only ever touches a /dev/shm path
     secrets = []
