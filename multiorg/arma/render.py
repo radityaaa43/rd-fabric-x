@@ -5,7 +5,7 @@ usage: render.py bi|bank-a|bank-b|bank-c --exchange DIR --genesis FILE --genesis
                  [--zone Z] [--storage-class SC] [--ips FILE] [--msp-id-format org{n}]
 bank-c is cluster 2: --zone and --storage-class are required (lead: ap-southeast-1a, fabricx-essd). Cluster 1 defaults: ap-southeast-5b, alicloud-essd-wffc.
 DIR holds org1..org4 (public trees from multiorg/fca/enroll.py; each is checked with check_exchange and must be clean). FILE is the S10 genesis block,
-refused unless its sha256 equals HEX and it is at most 900 KiB. Output (YAML documents, apply order): ConfigMaps genesis-block, arma-public-<N>, 4 x arma-config-<role>-<N>,
+refused unless its sha256 equals HEX and it is at most 700 KiB. Output (YAML documents, apply order): ConfigMaps genesis-block, arma-public-<N>, 4 x arma-config-<role>-<N>,
 NetworkPolicy allow-arma-peers, then 4 StatefulSets orderer-{router,batcher,consenter,assembler}-<N>. No Secret (orderer-<role>-<N>-secret is made by enroll.py)
 and no Service (lb-<N> is made by multiorg/lb/render.py). See RUNBOOK-S11.md.
 """
@@ -21,7 +21,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGE = "docker.io/hyperledger/fabric-x-orderer@sha256:052ae8e16571d3d4de2e1a0c4e9ed0d979d782d3539d3c8fb1f7f66fe560e265"  # 1.0.4, as running today
 DEFAULT_SC, DEFAULT_ZONE = "alicloud-essd-wffc", "ap-southeast-5b"   # cluster 1, as multiorg/fca/render.py
 AVOID_NODES = ["member-16033-node", "member-16034-node"]            # as panurus-itest/scripts/k8s.py: nodes other work uses (cluster 1)
-MAX_GENESIS = 900 * 1024
+# the block goes into a ConfigMap as base64 binaryData (x 4/3) and the whole object must stay under 1 MiB: 700 KiB raw is ~934 KiB encoded
+MAX_GENESIS = 700 * 1024
 UID = 10001
 ID_ARG = {"router": "router", "batcher1": "batcher", "consenter": "consenter", "assembler": "assembler"}   # args the old StatefulSets used; = SECRET_ROLE
 HOST = "{role}-{n}.arma.rd"   # genesis Host of every role (decision A: one config block with stable names; each pod resolves them with hostAliases)
@@ -96,7 +97,7 @@ def read_genesis(path, sha):
         die("--genesis-sha256 must be 64 lowercase hex characters")
     try:
         if os.path.getsize(path) > MAX_GENESIS:
-            die(f"--genesis {path} is larger than {MAX_GENESIS} bytes (900 KiB)")
+            die(f"--genesis {path} is larger than {MAX_GENESIS} bytes (700 KiB)")
         with open(path, "rb") as f:
             data = f.read()
     except OSError as e:

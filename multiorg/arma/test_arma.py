@@ -325,6 +325,15 @@ class PublicAndGenesis(Base):
             self.assertEqual(base64.b64decode(cm["binaryData"]["genesis.block"]), GENESIS)
             self.assertNotIn("data", cm)
 
+    def test_encoded_genesis_configmap_stays_under_the_object_limit(self):
+        big = os.path.join(self.tmp.name, "maxblock")
+        with open(big, "wb") as f:
+            f.write(b"x" * (700 * 1024))
+        sha = hashlib.sha256(b"x" * (700 * 1024)).hexdigest()
+        out = render.render("bi", **self.kw("bi", genesis=big, genesis_sha256=sha))
+        cm = next(d for d in yaml.safe_load_all(out) if d["metadata"]["name"] == "genesis-block")
+        self.assertLess(len(yaml.safe_dump(cm)), 1024 * 1024)
+
     def test_genesis_checks(self):
         self.refused(genesis_sha256="0" * 64)                       # mismatch
         self.refused(genesis_sha256=GEN_SHA.upper())                # not lowercase hex
@@ -332,7 +341,8 @@ class PublicAndGenesis(Base):
         self.refused(genesis_sha256="g" * 64)
         self.refused(genesis=os.path.join(self.tmp.name, "nope"))
         big = os.path.join(self.tmp.name, "big")
-        for size, ok in ((900 * 1024, True), (900 * 1024 + 1, False)):
+        # binaryData is base64 (x 4/3) and the whole ConfigMap must stay under the 1 MiB object limit: 700 KiB raw -> ~934 KiB encoded
+        for size, ok in ((700 * 1024, True), (700 * 1024 + 1, False)):
             with open(big, "wb") as f:
                 f.write(b"x" * size)
             sha = hashlib.sha256(b"x" * size).hexdigest()
