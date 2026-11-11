@@ -46,7 +46,10 @@ func setup(t *testing.T, as string, peerCode int, rows, fail string) (*[]string,
 		prechecks = append(prechecks, r.URL.Query().Get("gw")+" "+strings.TrimSpace(string(b)))
 		w.WriteHeader(peerCode)
 	}))
-	peer, peerURL = gw.Client(), gw.URL+"/?gw=%d"
+	for m := 1; m <= 4; m++ {
+		peers[m] = gw.Client()
+	}
+	peerURL = gw.URL + "/?gw=%d"
 	if peerCode == 0 {
 		gw.Close()
 	} else {

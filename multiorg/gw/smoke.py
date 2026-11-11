@@ -2,7 +2,7 @@
 """Smoke of the gateway render with the PINNED images (docker, no cluster): envoy --mode validate on the rendered envoy.yaml, and OPA started with the rendered args + config.
 OPA must come up (its bundle pull fails: no bundle-server here, that is expected); a config or flag error in the first seconds fails the smoke.
 
-  python3 -I multiorg/gw/smoke.py --templates DIR --opa-config FILE --gw-ips FILE --envoy-image repo@sha256:HEX --opa-image repo@sha256:HEX [--image repo@sha256:HEX]
+  python3 -I multiorg/gw/smoke.py --templates DIR --opa-config FILE --gw-ips FILE --tls-exchange DIR --envoy-image repo@sha256:HEX --opa-image repo@sha256:HEX [--image repo@sha256:HEX]
 """
 import argparse, importlib.util, os, subprocess, sys, tempfile
 import yaml
@@ -19,7 +19,7 @@ def run(cmd, timeout=60):
 
 def main():
     ap = argparse.ArgumentParser()
-    for o in ("templates", "opa-config", "gw-ips", "envoy-image", "opa-image"):
+    for o in ("templates", "opa-config", "gw-ips", "tls-exchange", "envoy-image", "opa-image"):
         ap.add_argument(f"--{o}", required=True)
     ap.add_argument("--image", default="example.io/rdbi@sha256:" + "d" * 64)
     a = ap.parse_args()
@@ -34,7 +34,7 @@ def main():
             sys.exit("openssl failed: " + r.stderr[:200])
         open(f"{d}/ca/ca.crt", "w").write(open(f"{d}/mtls/tls.crt").read())
         subprocess.run(["chmod", "-R", "a+rX", d])
-        docs = list(yaml.safe_load_all(gw.render("bi", a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, cert, a.gw_ips)))
+        docs = list(yaml.safe_load_all(gw.render("bi", a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, cert, a.gw_ips, a.tls_exchange)))
         cm = {x["metadata"]["name"]: x for x in docs if x["kind"] == "ConfigMap"}
         open(f"{d}/envoy.yaml", "w").write(cm["fx-gw-1-envoy"]["data"]["envoy.yaml"])
         open(f"{d}/opa.yaml", "w").write(cm["fx-gw-1-opa"]["data"]["opa.yaml"])
