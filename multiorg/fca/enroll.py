@@ -2,7 +2,7 @@
 """Enroll one party's four Arma roles at its own fca-org<N> and keep the keys only as Secrets (fabricx S9).
 
 usage: enroll.py init   <party> rd-fabricx-<party> --kubeconfig K --work W
-       enroll.py enroll <party> rd-fabricx-<party> --kubeconfig K --ca-url http://localhost:7054 --work W --out exchange/org<N>
+       enroll.py enroll <party> rd-fabricx-<party> --kubeconfig K --ca-url http://localhost:7054 --work W --out exchange/org<N> [--extra-san <host|ip> | --extra-san <role>=<host|ip>]...
 One org at a time (sequential): W under /dev/shm only (tmpfs, umask 077 set by the script); destroy W before the next org starts.
 init creates the admin password Secret (apply render.py's CA manifest after it). enroll runs `fabric-ca-client` (msp + tls profile)
 per role, writes Secrets `orderer-<role>-<N>-secret` with `kubectl create`, builds the public exchange tree, runs check_exchange,
@@ -17,6 +17,10 @@ import check_exchange
 
 PARTY_N = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
 ROLES = ("router", "batcher1", "consenter", "assembler")
+# One port per role, from the upstream sample (orderer@dd296e3 deployment/vms/sample-config/config.yaml:8-13 and deployment/README.md:10):
+# assembler 8011, consenter 8012, router 8013, batcher shards 8014+. Distinct per role so a per-party LB can also carry all four. Hosts and
+# ports go into the genesis (ADR 0001): this table is the single source, and the S10 runbook points at it.
+PORT_PLAN = {"assembler": 8011, "consenter": 8012, "router": 8013, "batcher1": 8014}
 SECRET_ROLE = {"router": "router", "batcher1": "batcher", "consenter": "consenter", "assembler": "assembler"}
 
 
@@ -32,6 +36,40 @@ def check_work(work):
         sys.exit(f"enroll.py: --work must be a normalized absolute path under /dev/shm/, got {work!r}")
     os.umask(0o077)
     return work
+
+
+def check_san(x):
+    import ipaddress
+    if re.fullmatch(r"[0-9.]+", x):                      # dotted digits must be a real IPv4 address
+        ipaddress.ip_address(x)
+        return x
+    try:
+        return str(ipaddress.ip_address(x)) if ":" in x else _hostname(x)
+    except ValueError:
+        sys.exit(f"enroll.py: --extra-san {x!r} is neither a host name nor an IP address")
+
+
+def _hostname(x):
+    if len(x) > 253 or not re.fullmatch(r"[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*", x):
+        raise ValueError(x)
+    return x
+
+
+def parse_extra_sans(items):
+    """--extra-san <host|ip> (all four roles of the party) or <role>=<host|ip> (that role only). Returns {role: [san, ...]}."""
+    out = {r: [] for r in ROLES}
+    for item in items:
+        role, _, san = item.rpartition("=") if "=" in item else ("", "", item)
+        if role and role not in ROLES:
+            sys.exit(f"enroll.py: --extra-san role {role!r} must be one of {', '.join(ROLES)}")
+        try:
+            san = check_san(san)
+        except ValueError:
+            sys.exit(f"enroll.py: --extra-san {item!r} is neither a host name nor an IP address")
+        for r in ([role] if role else ROLES):
+            if san not in out[r]:
+                out[r].append(san)
+    return out
 
 
 def first(pattern):
@@ -53,6 +91,7 @@ def write(p, data):
 
 
 def build(enrolled, exchange, n, ns, hosts, ports=None):
+    ports = PORT_PLAN if ports is None else ports
     """enrolled/<role>/{msp,tls}/{signcerts,cacerts|tlscacerts,keystore} -> exchange tree (certs) + Secret manifests (keys).
     Names follow what the nodes read: msp/keystore/priv_sk (config/config.go:308), tls/server.{crt,key} (config/generate/local_config_gen.go:195-196)."""
     secrets, endpoints = [], {}
@@ -67,7 +106,7 @@ def build(enrolled, exchange, n, ns, hosts, ports=None):
         write(f"{base}/{role}/tls/ca.crt", tlsca)
         if role in ("batcher1", "consenter"):
             write(f"{base}/{role}/msp/signcerts/{role}-cert.pem", sign)
-        endpoints[role] = {"Host": hosts[role], "Port": (ports or {}).get(role, 7050)}
+        endpoints[role] = {"Host": hosts[role], "Port": ports[role]}
         secrets.append({"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
                         "metadata": {"name": f"orderer-{SECRET_ROLE[role]}-{n}-secret", "namespace": ns},
                         "stringData": {"msp-keystore-priv_sk": read(first(f"{e}/msp/keystore/*_sk")),
@@ -110,13 +149,14 @@ def init(party, ns, kubeconfig, work):
     sh("kubectl", "--kubeconfig", kubeconfig, "-n", ns, "create", "secret", "generic", f"fca-org{n}-admin", f"--from-file=password={p}")
 
 
-def enroll(party, ns, kubeconfig, ca_url, work, out):
+def enroll(party, ns, kubeconfig, ca_url, work, out, extra_sans=()):
     """needs `kubectl --kubeconfig K -n NS port-forward svc/fca-org<N> 7054` running (party-admin Role: pods/portforward).
     Credentials travel only in the fabric-ca-client environment (FABRIC_CA_CLIENT_URL), never on a command line.
     [unverified live] that the client reads FABRIC_CA_CLIENT_URL and prints `Password: <x>` on a register without --id.secret
     (Fabric CA users guide): the window-start throwaway enroll settles it."""
     n = check_target(party, ns)
     work = check_work(work)
+    sans = parse_extra_sans(extra_sans)
     secrets = []
     try:
         pw = read(f"{work}/admin.pass").strip()
@@ -134,8 +174,8 @@ def enroll(party, ns, kubeconfig, ca_url, work, out):
             if not m:
                 sys.exit(f"enroll.py: register of {who} printed no generated password")
             secrets.append(m.group(1))
-            sh("fabric-ca-client", "enroll", "-M", f"{work}/enrolled/{role}/msp", "--csr.hosts", hosts[role], env=creds(who, m.group(1)), secrets=secrets)
-            sh("fabric-ca-client", "enroll", "-M", f"{work}/enrolled/{role}/tls", "--enrollment.profile", "tls", "--csr.hosts", hosts[role],
+            sh("fabric-ca-client", "enroll", "-M", f"{work}/enrolled/{role}/msp", "--csr.hosts", ",".join([hosts[role], *sans[role]]), env=creds(who, m.group(1)), secrets=secrets)
+            sh("fabric-ca-client", "enroll", "-M", f"{work}/enrolled/{role}/tls", "--enrollment.profile", "tls", "--csr.hosts", ",".join([hosts[role], *sans[role]]),
                env=creds(who, m.group(1)), secrets=secrets)
         for s in build(f"{work}/enrolled", out, n, ns, hosts):   # create, never apply: party-admin may create/update/patch secrets but not get
             sh("kubectl", "--kubeconfig", kubeconfig, "create", "-f", "-", stdin=yaml.safe_dump(s), secrets=secrets)
@@ -158,11 +198,13 @@ if __name__ == "__main__":
     a = sys.argv[1:]
     try:
         cmd, party, ns = a[0], a[1], a[2]
-        opt = dict(zip(a[3::2], a[4::2]))
+        opt, sans = {}, []
+        for k, v in zip(a[3::2], a[4::2]):
+            sans.append(v) if k == "--extra-san" else opt.__setitem__(k, v)
         if cmd == "init":
             init(party, ns, opt["--kubeconfig"], opt["--work"])
         elif cmd == "enroll":
-            enroll(party, ns, opt["--kubeconfig"], opt["--ca-url"], opt["--work"], opt["--out"])
+            enroll(party, ns, opt["--kubeconfig"], opt["--ca-url"], opt["--work"], opt["--out"], sans)
         else:
             raise IndexError
     except (IndexError, KeyError):

@@ -123,6 +123,27 @@ class Enroll(unittest.TestCase):
             blob = subprocess.run(["grep", "-r", "PRIVATE KEY", ex], capture_output=True, text=True).stdout
             self.assertEqual(blob, "")
 
+    def test_port_plan_is_the_single_source(self):
+        # upstream sample (orderer@dd296e3 deployment/vms/sample-config/config.yaml:8-13): assembler 8011, consenter 8012, router 8013, batcher shards 8014+
+        self.assertEqual(enroll.PORT_PLAN, {"assembler": 8011, "consenter": 8012, "router": 8013, "batcher1": 8014})
+        with tempfile.TemporaryDirectory() as t:
+            self.fake_enrolled(os.path.join(t, "enrolled"))
+            ex = os.path.join(t, "ex", "org2")
+            enroll.build(os.path.join(t, "enrolled"), ex, 2, "rd-fabricx-bank-a", {r: f"{r}-2.rd-fabricx-bank-a.svc.cluster.local" for r in enroll.ROLES})
+            ep = yaml.safe_load(open(os.path.join(ex, "endpoints.yaml")))
+            self.assertEqual({r: v["Port"] for r, v in ep.items()}, enroll.PORT_PLAN)
+
+    def test_parse_extra_sans(self):
+        self.assertEqual(enroll.parse_extra_sans([]), {r: [] for r in enroll.ROLES})
+        got = enroll.parse_extra_sans(["lb.example.org", "router=198.51.100.7", "assembler=lb2.example.org"])
+        self.assertEqual(got["router"], ["lb.example.org", "198.51.100.7"])           # no prefix = every role of the party
+        self.assertEqual(got["assembler"], ["lb.example.org", "lb2.example.org"])
+        self.assertEqual(got["consenter"], ["lb.example.org"])
+        for bad in ("", "a,b", "no spaces.example", "nosuchrole=lb.example", "-bad.example", "x" * 300, "300.1.1.1.1.1"):
+            with self.subTest(san=bad):
+                with self.assertRaises(SystemExit):
+                    enroll.parse_extra_sans([bad])
+
     def test_work_dir_must_be_tmpfs_and_private(self):
         for bad in ("/home/ecs-user/w", "/tmp/w", "/dev/shmx/w", "relative/w", "/dev/shm/../tmp/w"):
             with self.subTest(work=bad):
@@ -236,6 +257,24 @@ class EnrollFlow(unittest.TestCase):
         self.assertIn("fabric-ca-client", msg)
         self.assertIn("***", msg)
         self.assertFalse(os.path.exists(self.work))                # keys destroyed on error too
+
+    def test_extra_sans_reach_csr_hosts_of_the_right_roles(self):
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        enroll.enroll("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, self.out,
+                      extra_sans=["lb.example.org", "router=203.0.113.5"])
+        lines = [l for l in self.logtext("argv.log").splitlines() if l.startswith("enroll") and "--csr.hosts" in l]
+        self.assertEqual(len(lines), 8)                                                  # 4 roles x (msp, tls)
+        router = [l for l in lines if "router-2." in l]
+        self.assertTrue(all("router-2.rd-fabricx-bank-a.svc.cluster.local,lb.example.org,203.0.113.5" in l for l in router) and len(router) == 2)
+        other = [l for l in lines if "router-2." not in l]
+        self.assertTrue(all("lb.example.org" in l and "203.0.113.5" not in l for l in other))
+        self.assertIn("--csr.hosts", self.logtext("argv.log"))
+
+    def test_no_extra_sans_keeps_the_cluster_name_only(self):
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        enroll.enroll("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, self.out)
+        lines = [l for l in self.logtext("argv.log").splitlines() if "--csr.hosts" in l]
+        self.assertTrue(all(l.rstrip().endswith(".svc.cluster.local") for l in lines))
 
     def test_scrub_covers_every_secret(self):
         self.assertEqual(enroll.scrub("a S1 b S2 c", ["S1", "S2"]), "a *** b *** c")
