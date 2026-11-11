@@ -355,6 +355,103 @@ class EnrollFlow(unittest.TestCase):
         lines = [l for l in self.logtext("argv.log").splitlines() if "--csr.hosts" in l]
         self.assertTrue(all(l.rstrip().endswith(".svc.cluster.local") for l in lines))
 
+    def make_tree(self, name="src"):
+        import test_check_exchange as tce
+        root = os.path.join(self.tmp.name, name, "org2")
+        tce.good_tree(root, 2)
+        return root
+
+    def test_admin_identity_adds_admincerts_and_one_secret(self):
+        """PLAN S8: per org one CA identity admin-<N> (type admin): cert into the PUBLIC tree msp/admincerts/, key only as Secret orderer-admin-<N>-secret."""
+        src, dst = self.make_tree(), os.path.join(self.tmp.name, "dst", "org2")
+        before = open(os.path.join(src, "MANIFEST.sha256")).read()
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        pw = open(os.path.join(self.work, "admin.pass")).read().strip()
+        enroll.admin("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, src, dst)
+        argv = self.logtext("argv.log")
+        self.assertIn("--id.name admin-2 ", argv + " ")
+        self.assertIn("--id.type admin", argv)
+        self.assertNotIn("--id.secret", argv)
+        self.assertNotIn(pw, argv + self.logtext("kubectl.log"))
+        self.assertNotIn("ROLESECRET", argv)
+        self.assertIn("ROLESECRETadmin-2", self.logtext("url.log"))                    # the generated password travelled in the env only
+        out = self.logtext("kubectl-stdin.log")
+        self.assertIn("name: orderer-admin-2-secret", out)
+        self.assertIn("msp-keystore-priv_sk", out)
+        self.assertIn("msp-signcert.pem", out)
+        self.assertNotIn("orderer-router", out)                                           # the role Secrets are not touched
+        self.assertEqual(self.logtext("kubectl.log").count("create -f -"), 1)
+        cert = open(os.path.join(dst, "msp", "admincerts", "admin-2-cert.pem")).read()
+        self.assertIn("BEGIN CERTIFICATE", cert)
+        self.assertNotIn("PRIVATE KEY", cert)
+        self.assertEqual(check_exchange.problems(dst, 2, require_admin=True), [])
+        self.assertEqual(open(os.path.join(src, "MANIFEST.sha256")).read(), before)       # the source tree is untouched
+        self.assertFalse(os.path.exists(os.path.join(src, "msp", "admincerts")))
+        self.assertFalse(os.path.exists(self.work))                                       # destroyed
+
+    def test_admin_refusals(self):
+        src, dst = self.make_tree(), os.path.join(self.tmp.name, "dst", "org2")
+
+        def refused(*a, **k):
+            enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)     # every call destroys the work dir (finally): start each from a fresh one
+            with self.assertRaises(SystemExit):
+                enroll.admin(*a, **k)
+            self.assertFalse(os.path.exists(self.work))
+
+        os.makedirs(dst)
+        refused("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, src, dst)     # destination exists
+        os.rmdir(dst)
+        refused("bank-a", "rd-fabricx-bi", "/k", "http://localhost:7054", self.work, src, dst)         # wrong namespace
+        with open(os.path.join(src, "orderers", "party2", "router", "tls", "server.key"), "w") as f:
+            f.write("-----BEGIN PRIVATE KEY-----\nAA\n-----END PRIVATE KEY-----\n")
+        import test_check_exchange as tce
+        tce.manifest(src)
+        refused("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, src, dst)     # unclean source tree
+        self.assertFalse(os.path.exists(dst))
+        self.assertNotIn("create -f -", self.logtext("kubectl.log"))                                    # nothing was created in any refusal
+
+    def test_endorser_identity_goes_to_knowncerts_and_its_own_secret(self):
+        """lead Q1: known_certs carries the FSC ENDORSER certs: CA identity endorser-<N> (type client), cert in msp/knowncerts/, key as Secret fsc-endorser-<N>-secret."""
+        src, dst = self.make_tree(), os.path.join(self.tmp.name, "dst", "org2")
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        enroll.identity("endorser", "bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, src, dst)
+        argv = self.logtext("argv.log")
+        self.assertIn("--id.name endorser-2 ", argv + " ")
+        self.assertIn("--id.type client", argv)
+        self.assertNotIn("--id.type admin", argv)
+        out = self.logtext("kubectl-stdin.log")
+        self.assertIn("name: fsc-endorser-2-secret", out)
+        self.assertNotIn("orderer-admin", out)
+        self.assertIn("BEGIN CERTIFICATE", open(os.path.join(dst, "msp", "knowncerts", "endorser-2-cert.pem")).read())
+        self.assertFalse(os.path.exists(os.path.join(dst, "msp", "admincerts")))
+        self.assertEqual(check_exchange.problems(dst, 2, require_known=True), [])
+        self.assertIn("missing msp/knowncerts/*.pem", check_exchange.problems(src, 2, require_known=True))   # the source had none
+
+    def test_both_kinds_chain_on_one_tree_and_unknown_kind_is_refused(self):
+        src = self.make_tree()
+        mid, dst = os.path.join(self.tmp.name, "mid", "org2"), os.path.join(self.tmp.name, "dst", "org2")
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        enroll.identity("admin", "bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, src, mid)
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        enroll.identity("endorser", "bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, mid, dst)
+        self.assertEqual(check_exchange.problems(dst, 2, require_admin=True, require_known=True), [])
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        with self.assertRaises(SystemExit):
+            enroll.identity("auditor", "bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, src, os.path.join(self.tmp.name, "x"))
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        with self.assertRaises(SystemExit):                                               # an endorser already in the source: new tree needs a new generation
+            enroll.identity("endorser", "bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, dst, os.path.join(self.tmp.name, "y"))
+
+    def test_admin_with_generation_and_existing_admincerts(self):
+        src, dst = self.make_tree(), os.path.join(self.tmp.name, "dst", "org2")
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        enroll.admin("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, src, dst, generation="g2")
+        self.assertIn("--id.name admin-2-g2 ", self.logtext("argv.log") + " ")
+        self.assertIn("name: orderer-admin-2-secret", self.logtext("kubectl-stdin.log"))
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        with self.assertRaises(SystemExit):                                               # already has admincerts: new generation, new tree
+            enroll.admin("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, dst, os.path.join(self.tmp.name, "dst2"))
+
     def test_scrub_covers_every_secret(self):
         self.assertEqual(enroll.scrub("a S1 b S2 c", ["S1", "S2"]), "a *** b *** c")
         self.assertEqual(enroll.scrub("x", []), "x")

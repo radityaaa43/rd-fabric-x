@@ -9,7 +9,7 @@ import glob, hashlib, os, sys
 import yaml
 
 
-def problems(root, n):
+def problems(root, n, require_admin=False, require_known=False):
     out = []
     must = ["msp/cacerts/*.pem", "msp/tlscacerts/*.pem"]
     base = f"orderers/party{n}"
@@ -23,6 +23,10 @@ def problems(root, n):
         must.append(f"{base}/{r}/tls/server.crt")
         if r.startswith("batcher") or r == "consenter":
             must.append(f"{base}/{r}/msp/signcerts/{r}-cert.pem")
+    if require_admin:   # PLAN S8: the org MSP needs an admin identity, or no config transaction can ever be authorized
+        must.append("msp/admincerts/*.pem")
+    if require_known:   # lead Q1: known_certs carries the FSC endorser certs (msp/knowncerts/ is what the MSP loader reads into known_certs)
+        must.append("msp/knowncerts/*.pem")
     out += [f"missing {m}" for m in must if not glob.glob(f"{root}/{m}")]
     try:
         ep = yaml.safe_load(open(f"{root}/endpoints.yaml"))

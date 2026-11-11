@@ -95,6 +95,25 @@ class Exchange(unittest.TestCase):
         self.assertNotEqual(r.returncode, 0)
         self.assertIn("MANIFEST", r.stderr)
 
+    def test_admincerts_required_only_when_asked(self):
+        import importlib; ce = importlib.import_module("check_exchange")
+        self.assertEqual(ce.problems(self.root, 2), [])                                   # default: not required (B3 trees)
+        self.assertIn("missing msp/admincerts/*.pem", ce.problems(self.root, 2, require_admin=True))
+        write(self.root, "msp/admincerts/admin-2-cert.pem", CERT)
+        manifest(self.root)
+        self.assertEqual(ce.problems(self.root, 2, require_admin=True), [])
+        write(self.root, "msp/admincerts/admin-2-cert.pem", "-----BEGIN PRIVATE KEY-----\nAA\n-----END PRIVATE KEY-----\n")
+        manifest(self.root)
+        self.assertTrue(any("private key" in p for p in ce.problems(self.root, 2, require_admin=True)))
+
+    def test_knowncerts_required_only_when_asked(self):
+        import importlib; ce = importlib.import_module("check_exchange")
+        self.assertIn("missing msp/knowncerts/*.pem", ce.problems(self.root, 2, require_known=True))
+        write(self.root, "msp/knowncerts/endorser-2-cert.pem", CERT)
+        manifest(self.root)
+        self.assertEqual(ce.problems(self.root, 2, require_known=True), [])
+        self.assertEqual(ce.problems(self.root, 2), [])
+
     def test_wrong_party_number_is_refused(self):
         self.assertNotEqual(check(self.root, 3).returncode, 0)
 
