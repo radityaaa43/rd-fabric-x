@@ -23,6 +23,15 @@ It (1) runs `check_exchange` on every org (any private key, missing role, bad ma
 ## Port plan (single source: `PORT_PLAN` in `multiorg/fca/enroll.py`)
 Proposed from the upstream Arma sample, not guessed: `orderer@dd296e3:deployment/vms/sample-config/config.yaml:8-13` uses assembler 8011, consenter 8012, router 8013, batcher shards 8014, 8015 for every party (`deployment/README.md:10`: same port per role on different hosts). Ours: assembler 8011, consenter 8012, router 8013, batcher1 8014 (one shard; a second shard would take 8015). They are distinct per role, so a per-party LB can carry all four. `enroll.py` writes `endpoints.yaml` from this table. Orgs enrolled in B3 have `endpoints.yaml` with 7050: it must be regenerated (re-run the exchange build, or edit the endpoints before the one real build) because ports are part of the genesis (ADR 0001).
 
+## Regenerate the endpoints and dry-run the pipeline (repo-only; shown on the real B3 trees)
+```
+python3 multiorg/s10/regen_endpoints.py --exchange <B3 trees> --out <NEW dir> --lb-host-template '{role}-{n}.lb.{party}'   # prints the new --heads
+python3 multiorg/s10/build_genesis.py --dry-run --exchange <NEW dir> --armageddon <bin> --sample-config <dir> --out <dir> --heads <printed heads>
+```
+`regen_endpoints.py` writes ports from `PORT_PLAN` (8011-8014) and hosts from the template into a COPY (the source trees are never modified, the destination must not exist), rewrites each org's `MANIFEST.sha256`, and prints the new hashes: each org must announce them again. Placeholder hosts are `<role>-<N>.lb.<party>` until S16 provides the real LB hosts.
+`build_genesis.py` now REFUSES a real build when a host is a `*.lb.<party>` placeholder or a port is not the planned one (this catches the B3 trees, which still say 7050). `--dry-run` accepts placeholders and keeps neither the block nor the base dir: it proves the pipeline only.
+Real-tree result (scratch, nothing applied): B3 trees -> regenerated copy (ports 8011-8014, placeholder hosts) -> real build refused with the placeholder message -> `--dry-run` rc 0, 4 parties, sha256 printed (`1e850d24...`, meaningless: the block is not reproducible), no block kept; the original trees still have port 7050.
+
 ## Endpoint and SAN plan (lead design, ADR 0001 3/1 topology; decided, LBs not built yet)
 - Intra-cluster paths (parties 1-3 among themselves): `<role>-<N>.rd-fabricx-<party>.svc.cluster.local`.
 - Every cross-cluster path (party 4 <-> parties 1-3) uses the PUBLIC LB endpoint of the target role (per-role or per-party LB, TCP, ACL-first rule, S16). The genesis `Host` of a role that is reached cross-cluster is therefore the LB host.

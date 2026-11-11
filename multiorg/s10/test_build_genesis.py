@@ -9,6 +9,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
 import build_genesis
+import regen_endpoints
 import test_check_exchange as tce
 
 STUB = r"""#!/bin/sh
@@ -35,6 +36,12 @@ def make_exchange(root, parties=(1, 2, 3, 4)):
     for n in parties:
         d = os.path.join(root, f"org{n}")
         tce.good_tree(d, n)
+        # a real build only accepts the port plan and real hosts: the fixture tree from the checker test has neither
+        PORTS = {"router": 8013, "batcher1": 8014, "consenter": 8012, "assembler": 8011}
+        ep = {r: {"Host": f"{r}-{n}.fabricx.example.org", "Port": p} for r, p in PORTS.items()}
+        with open(os.path.join(d, "endpoints.yaml"), "w") as f:
+            yaml.safe_dump(ep, f)
+        tce.manifest(d)
 
 
 class Build(unittest.TestCase):
@@ -73,7 +80,8 @@ class Build(unittest.TestCase):
         self.assertEqual(sc["MaxPartyID"], 4)
         self.assertEqual(sc["Consensus"]["BFTConfig"]["LeaderHeartbeatCount"], 10)      # defaults come from the upstream generator
         p2 = next(p for p in sc["Parties"] if p["PartyID"] == 2)
-        self.assertEqual(p2["RouterConfig"]["Host"], "router-2.rd-fabricx-bank-a.svc")   # fixture host from tce.good_tree
+        self.assertEqual(p2["RouterConfig"]["Host"], "router-2.fabricx.example.org")
+        self.assertEqual(p2["RouterConfig"]["Port"], 8013)
         self.assertTrue(p2["CACerts"][0].startswith("crypto/ordererOrganizations/org2/msp/cacerts/"))
         self.assertTrue(p2["ConsenterConfig"]["SignCert"].endswith("consenter/msp/signcerts/consenter-cert.pem"))
         self.assertEqual(p2["BatchersConfig"][0]["ShardID"], 1)
@@ -97,6 +105,37 @@ class Build(unittest.TestCase):
         shutil.rmtree(os.path.join(self.ex, "org4"))
         with self.assertRaises(SystemExit):
             self.run_build()
+
+    def test_real_build_refuses_placeholder_hosts_and_off_plan_ports(self):
+        for mutate, why in ((lambda ep: ep["router"].update(Host="router-2.lb.bank-a"), "placeholder host"),
+                            (lambda ep: ep["router"].update(Port=7050), "port outside the plan")):
+            with self.subTest(why=why):
+                t = tempfile.TemporaryDirectory()
+                ex = os.path.join(t.name, "ex")
+                make_exchange(ex)
+                p = os.path.join(ex, "org2", "endpoints.yaml")
+                ep = yaml.safe_load(open(p))
+                mutate(ep)
+                with open(p, "w") as f:
+                    yaml.safe_dump(ep, f)
+                tce.manifest(os.path.join(ex, "org2"))
+                with self.assertRaises(SystemExit):
+                    build_genesis.build(ex, self.arma, self.sample, os.path.join(t.name, "out"))
+                self.assertFalse(os.path.exists(os.path.join(self.log, "argv.log")))
+                t.cleanup()
+
+    def test_dry_run_accepts_placeholders_and_keeps_no_block(self):
+        ex2 = os.path.join(self.tmp.name, "ex2")
+        regen_endpoints.regen(self.ex, ex2, "{role}-{n}.lb.{party}")
+        out = os.path.join(self.tmp.name, "dry")
+        r = build_genesis.build(ex2, self.arma, self.sample, out, dry_run=True)
+        self.assertTrue(r["dry_run"])
+        self.assertEqual(len(r["sha256"]), 64)
+        self.assertFalse(os.path.exists(os.path.join(out, "block", "bootstrap.block")))      # block not kept
+        self.assertFalse(os.path.exists(os.path.join(out, "base")))                          # nor the base dir
+        self.assertTrue(os.path.exists(os.path.join(self.log, "argv.log")))                  # the pipeline really ran
+        with self.assertRaises(SystemExit):
+            build_genesis.build(ex2, self.arma, self.sample, os.path.join(self.tmp.name, "real"))
 
     def test_cli_requires_heads(self):
         # a real build without the announced hashes would skip the check: the CLI refuses it
