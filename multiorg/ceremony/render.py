@@ -4,7 +4,7 @@
 usage: render.py role <party>
        render.py job <party> --tx FILE --cacert FILE --image repo@sha256:HEX --tx-name NAME
        render.py submit bi --tx FILE --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME      (tx1 submit --wait, BI only)
-       render.py readback bi --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME              (`namespace list`, BI only)
+       render.py readback bi --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME              (`namespace list`, every party: its own committer-tls and query service)
        render.py setuppp bi --image repo@sha256:HEX --name NAME [--namespace rd_dfabi_v2]       (rdbi-driver setup-pp, BI only)
        render.py probe <party> --image repo@sha256:HEX --name NAME --try LABEL=HOST:PORT ... [--allow pod=APP:PORT | --allow dns ...]
 `role`: Role s14-sign + RoleBinding in rd-fabricx-<party>: jobs create+get, pods get, pods/log get, bound to the org's own party-admin ServiceAccount only. TIME-BOXED: created right before the
@@ -162,8 +162,8 @@ NET_EGRESS = {"submit": ["pod=orderer-router-1:8013", "pod=committer-sidecar:513
 def render_net(kind, party, image, tx_name, cacert, mspca, tx=None):
     if kind not in NET_EGRESS:
         die(f"kind {kind!r} must be one of {', '.join(NET_EGRESS)}")
-    if party != "bi":
-        die("submit/readback are rendered for BI only (orchestrator S1: BI's own committer-tls and org1 key)")
+    if party != "bi" and kind == "submit":
+        die("submit is rendered for BI only (orchestrator S1: BI's own committer-tls and org1 key); readback is rendered for every party with that party's own committer-tls")
     n, ns = check(party)
     if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image or ""):
         die("--image must be pinned by digest (repo@sha256:<64 hex>)")
@@ -173,7 +173,7 @@ def render_net(kind, party, image, tx_name, cacert, mspca, tx=None):
     job_name = f"{app}-{tx_name}"
     cfg = {"msp": {"localMspID": f"org{n}", "configPath": "/w/msp"},
            "tls": {"enabled": True, "clientCert": "/w/tls/client.crt", "clientKey": "/w/tls/client.key", "rootCerts": ["/w/tlsca.pem", "/w/tls/ca.crt"]},
-           "orderer": {"address": "lb-1:8013", "channel": "arma", "connectionTimeout": "15s", "tls": {"serverNameOverride": "router-1.arma.rd"}},
+           "orderer": {"address": f"lb-{n}:8013", "channel": "arma", "connectionTimeout": "15s", "tls": {"serverNameOverride": f"router-{n}.arma.rd"}},
            "queries": {"address": "committer-query-service:5140", "connectionTimeout": "15s"},
            "notifications": {"address": "committer-sidecar:5130", "connectionTimeout": "15s", "waitingTimeout": "60s"}}
     if not mspca:
