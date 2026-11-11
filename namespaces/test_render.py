@@ -14,7 +14,7 @@ POLICIES = {"default-deny-ingress", "allow-same-namespace", "allow-dns-egress"}
 SA = "party-admin"
 
 
-def check(docs, party):
+def check(docs, party, cluster=None):
     """Assert the S1 contract on a rendered document list; raises AssertionError on the first gap."""
     ns = f"rd-fabricx-{party}"
     by = {}
@@ -24,6 +24,7 @@ def check(docs, party):
     labels = by["Namespace"][ns]["metadata"]["labels"]
     assert labels.get("part-of") == "rd-fabricx" and labels.get("party") == party, labels
     assert labels.get("pod-security.kubernetes.io/enforce") == "restricted", labels
+    assert labels.get("cluster") == cluster, labels  # cluster-1 namespaces carry no cluster label
     assert set(by.get("NetworkPolicy", {})) == POLICIES, f"NetworkPolicy set {set(by.get('NetworkPolicy', {}))}"
     assert set(by.get("ServiceAccount", {})) == {SA}, "ServiceAccount party-admin missing"
     assert set(by.get("Role", {})) == {SA}, "Role party-admin missing"
@@ -79,13 +80,37 @@ class Render(unittest.TestCase):
         with self.assertRaises(AssertionError):
             check(docs, "bi")
 
-    def test_bank_c_refused(self):
+    def run_cli(self, *args):
+        return subprocess.run([sys.executable, os.path.join(HERE, "render.py"), *args], capture_output=True, text=True)
+
+    def test_bank_c_refused_without_flag(self):
         with self.assertRaises(SystemExit):
             render.render("bank-c")
-        r = subprocess.run([sys.executable, os.path.join(HERE, "render.py"), "bank-c"], capture_output=True, text=True)
+        r = self.run_cli("bank-c")
         self.assertNotEqual(r.returncode, 0)
-        self.assertIn("cluster 2", r.stderr)
+        self.assertIn("--cluster 2", r.stderr)
         self.assertEqual(r.stdout, "")
+
+    def test_bank_c_cluster2_meets_contract(self):
+        docs = list(yaml.safe_load_all(render.render("bank-c", cluster=2)))
+        check(docs, "bank-c", cluster="2")
+        r = self.run_cli("--cluster", "2", "bank-c")
+        self.assertEqual(r.returncode, 0, r.stderr)
+        check(list(yaml.safe_load_all(r.stdout)), "bank-c", cluster="2")
+
+    def test_cluster2_only_bank_c(self):
+        for p in PARTIES:
+            with self.subTest(party=p):
+                with self.assertRaises(SystemExit):
+                    render.render(p, cluster=2)
+        self.assertNotEqual(self.run_cli("--cluster", "2", "bi").returncode, 0)
+
+    def test_cluster1_output_unchanged_by_flag_support(self):
+        for p in PARTIES:
+            self.assertNotIn("cluster", self.docs(p)[0]["metadata"]["labels"])
+
+    def test_bad_cluster_refused(self):
+        self.assertNotEqual(self.run_cli("--cluster", "3", "bank-c").returncode, 0)
 
     def test_unknown_party_refused(self):
         with self.assertRaises(SystemExit):
