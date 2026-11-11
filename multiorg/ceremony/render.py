@@ -21,7 +21,7 @@ the lock label): submit = router :8013 + sidecar :5130 + DNS; readback = query :
 mounts for the same client identity: CM fx-gw-1-client (client-config + the gateway public cert + the PUBLIC public-params.bin), Secret fx-gw-1-client key gw.key, CM rdbi-public ca-bundle.pem. Egress (own
 policy, lock label): the issuer FSC view port :5100 + DNS. The issuer node itself talks to the orderer/committer, not the Job.
 `probe`: a Job that mounts NO Secret, carries the label and tries TCP connects (bash /dev/tcp, 4 s each), printing `LABEL HOST:PORT OPEN|CLOSED`; its own policy allows only the --allow entries
-(pod=<app.kubernetes.io/name>:<port> in the same namespace, dns = kube-system :53). It proves the policy binds before any key-holding Job relies on it.
+(pod=<app.kubernetes.io/name>:<port> in the same namespace, ip=<ipv4>/32:<port> one host, dns = kube-system :53). It proves the policy binds before any key-holding Job relies on it.
 """
 import argparse, re, sys
 import yaml
@@ -109,6 +109,11 @@ def render_job(party, tx, cacert, image, tx_name):
 def egress_rule(spec):
     if spec == "dns":
         return {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}
+    ip = re.fullmatch(r"ip=(\d{1,3}(?:\.\d{1,3}){3})/32:(\d{1,5})", spec)
+    if ip:   # one host, one port: the API-server / LB probes of the FSC re-issue
+        if any(int(x) > 255 for x in ip.group(1).split(".")) or ip.group(1) == "0.0.0.0" or not 0 < int(ip.group(2)) < 65536:
+            die(f"--allow {spec!r}: bad address or port")
+        return {"to": [{"ipBlock": {"cidr": ip.group(1) + "/32"}}], "ports": [{"port": int(ip.group(2)), "protocol": "TCP"}]}
     m = re.fullmatch(r"pod=([a-z0-9]([a-z0-9-]*[a-z0-9])?):(\d{1,5})", spec)
     if not m or not 0 < int(m.group(3)) < 65536:
         die(f"--allow {spec!r} must be dns or pod=<app.kubernetes.io/name>:<port 1-65535>")

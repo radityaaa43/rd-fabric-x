@@ -79,7 +79,7 @@ class Job(unittest.TestCase):
         self.assertEqual(c["command"][1:], ["--node", "endorser-3", "--ca-url", "http://fca-org3.rd-fabricx-bank-b.svc.cluster.local:7054",
                                             "--hosts", "endorser-3,endorser-3.rd-fabricx-bank-b.svc.cluster.local", "--names", "C=US,ST=North Carolina,O=Hyperledger",
                                             "--secret", "rdbi-bank3-files", "--in", "/in", "--work", "/work",
-                                            "--keys", "own__endorser-3__fsc__cert.pem,own__endorser-3__fsc__key.pem"])
+                                            "--keys", "own__endorser-3__fsc__cert.pem,own__endorser-3__fsc__key.pem", "--gen", "g1"])
         text = yaml.safe_dump(by(self.job(), "Job"))
         for bad in ("password", "FABRIC_CA_CLIENT_URL", "admin.pass", "fca-org3-admin", "env:"):
             self.assertNotIn(bad, text)
@@ -92,6 +92,19 @@ class Job(unittest.TestCase):
             {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "fca-org3"}}}], "ports": [{"port": 7054, "protocol": "TCP"}]},
             {"to": [{"ipBlock": {"cidr": API}}], "ports": [{"port": 443, "protocol": "TCP"}]},
             {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
+
+    def test_modes_add_exactly_one_flag(self):
+        cmd = lambda **kw: by(self.job(**kw), "Job")["spec"]["template"]["spec"]["containers"][0]["command"]
+        self.assertEqual(cmd(mode="dry-run")[-1], "--dry-run")
+        self.assertEqual(cmd(mode="remove-prev")[-1], "--remove-prev")
+        self.assertNotIn("--dry-run", cmd())
+        self.assertNotIn("--remove-prev", cmd())
+        with self.assertRaises(SystemExit):
+            self.job(mode="delete")
+
+    def test_remove_prev_job_mounts_no_identity(self):
+        spec = by(self.job(mode="remove-prev"), "Job")["spec"]["template"]["spec"]
+        self.assertEqual(sorted(v["name"] for v in spec["volumes"]), ["work"])
 
     def test_every_node_of_every_party(self):
         for p, nodes in NODES.items():
