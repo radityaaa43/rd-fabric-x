@@ -8,7 +8,7 @@ import yaml
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 sys.path.insert(0, os.path.dirname(HERE))
-import enroll, render
+import b3san_plan, enroll, render
 import check_exchange
 
 PARTIES = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
@@ -195,6 +195,34 @@ class Enroll(unittest.TestCase):
         self.assertEqual(enroll.check_target("bank-c", "rd-fabricx-bank-c"), 4)
 
 
+class B3SanPlan(unittest.TestCase):
+    def test_plan_lists_every_org_and_role_without_secrets(self):
+        out = b3san_plan.plan("{role}-{n}.lb.{party}")
+        self.assertIn("WARNING: placeholder LB hosts", out.splitlines()[0])
+        for party, n in PARTIES.items():
+            self.assertIn(f"enroll.py enroll {party} rd-fabricx-{party}", out)
+            self.assertIn(f"--extra-san router=router-{n}.lb.{party}", out)
+            self.assertIn(f"--extra-san batcher1=batcher1-{n}.lb.{party}", out)
+            self.assertIn(f"fca-org{n}-admin", out)
+        self.assertEqual(out.count("--generation san1"), 4)
+        self.assertNotIn("Password", out)
+        self.assertNotIn("://admin", out)
+        self.assertLess(out.index("rd-fabricx-bi"), out.index("rd-fabricx-bank-a"))          # sequential, bi first
+
+    def test_real_hosts_have_no_warning_and_bad_input_is_refused(self):
+        self.assertNotIn("WARNING", b3san_plan.plan("{role}-{n}.fabricx.example.org"))
+        for bad in ("fixed.example.org", "{role}-{n} bad.example"):
+            with self.assertRaises(SystemExit):
+                b3san_plan.plan(bad)
+        with self.assertRaises(SystemExit):
+            b3san_plan.plan("{role}-{n}.example.org", generation="UP")
+
+    def test_cli(self):
+        r = subprocess.run([sys.executable, os.path.join(HERE, "b3san_plan.py"), "--lb-host-template", "{role}-{n}.example.org"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertEqual(subprocess.run([sys.executable, os.path.join(HERE, "b3san_plan.py")], capture_output=True, text=True).returncode, 1)
+
+
 FCA_STUB = r"""#!/bin/sh
 # stub fabric-ca-client: records argv and the URL env; register prints a generated password like the real client
 echo "$@" >> "$STUB_LOG/argv.log"
@@ -290,6 +318,36 @@ class EnrollFlow(unittest.TestCase):
         other = [l for l in lines if "router-2." not in l]
         self.assertTrue(all("lb.example.org" in l and "203.0.113.5" not in l for l in other))
         self.assertIn("--csr.hosts", self.logtext("argv.log"))
+
+    def test_generation_registers_new_identities_and_replaces_secrets(self):
+        # B3-SAN: the first-run role secrets were never stored and identities cannot be removed (allowremove false):
+        # new identity names carry the generation tag; the SAME Secret names are overwritten with `kubectl replace`.
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        enroll.enroll("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, self.out,
+                      extra_sans=["lb.example.org"], generation="san1", replace_secrets=True)
+        argv = self.logtext("argv.log")
+        for role in enroll.ROLES:
+            self.assertIn(f"--id.name {role}-2-san1", argv)
+            self.assertNotIn(f"--id.name {role}-2 ", argv + " ")
+        k = self.logtext("kubectl.log")
+        self.assertEqual(k.count("replace -f -"), 4)
+        self.assertNotIn("create -f -", k.replace("secret generic", ""))
+        self.assertIn("orderer-router-2-secret", self.logtext("kubectl-stdin.log"))        # same Secret names as B3
+        self.assertNotIn("san1-secret", self.logtext("kubectl-stdin.log"))
+        self.assertEqual(check_exchange.problems(self.out, 2), [])
+
+    def test_generation_is_validated(self):
+        for bad in ("", "a b", "UP", "x" * 20, "-a"):
+            with self.subTest(g=bad):
+                with self.assertRaises(SystemExit):
+                    enroll.check_generation(bad)
+        self.assertEqual(enroll.check_generation("san1"), "san1")
+
+    def test_default_run_is_unchanged(self):
+        enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
+        enroll.enroll("bank-a", "rd-fabricx-bank-a", "/k", "http://localhost:7054", self.work, self.out)
+        self.assertEqual(self.logtext("kubectl.log").count("create -f -"), 4)
+        self.assertIn("--id.name router-2 ", self.logtext("argv.log") + " ")
 
     def test_no_extra_sans_keeps_the_cluster_name_only(self):
         enroll.init("bank-a", "rd-fabricx-bank-a", "/k", self.work)
