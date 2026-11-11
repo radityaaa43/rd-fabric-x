@@ -12,7 +12,11 @@ Each institution pod has one PVC (alicloud-essd-wffc, 2Gi) for its node stores, 
 $HOME/.fabricx-token in the container, loopback addresses become the pods' Services, and the files they reference
 are packed into one Secret per pod (sent to kubectl on stdin, never written to disk), unpacked by an init container.
 
-usage: k8s.py apply [replicas]   Secrets, PVCs, Services, Deployments (replicas default 1)
+usage: k8s.py render --org bi|bank-a|bank-b --ns rd-fabricx-<org>
+                                 one party's objects (its pod, Services, Secret, PVC, Deployment at 0 replicas) in its own
+                                 namespace, final design PLAN S2. stdout only; Secret data and env values are "redacted" (review and dry-run, never apply).
+                                 Needs IMAGE pinned by digest. Cluster 2 (bank-c) is S18, refused here.
+       k8s.py apply [replicas]   Secrets, PVCs, Services, Deployments (replicas default 1)
        k8s.py seed               copy this host's node stores into the PVCs (Deployments at 0, local nodes stopped)
        k8s.py gw render|apply N  OPA gateway fx-gw-N of party N (1 BI .. 4 Bank C), fabric-x/opa/DESIGN.md: Envoy (mTLS,
                                  ext_authz) + OPA + fxapi (rdbi-driver serve, party N's view-client key only).
@@ -29,8 +33,9 @@ H = os.environ.get("RDBI_HOME", os.path.expanduser("~/.fabricx-token"))
 T = "/home/rdbi/.fabricx-token"
 NS = "fabricx"
 IMAGE = os.environ["IMAGE"]
-COMMITTER_IMAGE = "docker.io/hyperledger/fabric-x-committer:1.0.4"
-PG_IMAGE = "docker.io/library/postgres:17.10"
+# pinned by digest (the digests the cluster runs today): committer 1.0.4, postgres 17.10
+COMMITTER_IMAGE = "docker.io/hyperledger/fabric-x-committer@sha256:b5bc4c6c010f54843dfb023cb1f18f56d4cd9b958565efd243e20a0a35b5a13d"
+PG_IMAGE = "docker.io/library/postgres@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317"
 COMMITTER_CFG = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "multiorg", "committer", "config")
 PODS = {"rdbi-bi": ["issuer", "endorser-1"], "rdbi-bank2": ["bank2", "endorser-2"],
         "rdbi-bank3": ["bank3", "endorser-3"], "rdbi-bank4": ["bank4", "endorser-4"]}
@@ -38,7 +43,7 @@ POD_OF = {n: p for p, nodes in PODS.items() for n in nodes}
 BANK = {"rdbi-bank2": ("bank2", "OrdererOrg2MSP", "fca-orderer-org2"),
         "rdbi-bank3": ("bank3", "OrdererOrg3MSP", "fca-orderer-org3"),
         "rdbi-bank4": ("bank4", "OrdererOrg4MSP", "fca-orderer-org4")}
-BI_COMMITTER = ("committer-sidecar.fabricx.svc.cluster.local:5130", "committer-query-service.fabricx.svc.cluster.local:5140")
+bi_committer = lambda: (f"committer-sidecar.{NS}.svc.cluster.local:5130", f"committer-query-service.{NS}.svc.cluster.local:5140")
 OWN_COMMITTER = ("localhost:6130", "localhost:6140")
 LABELS = {"app.kubernetes.io/part-of": "rdbi"}
 # the member nodes (free disk and pod slots) are in zone 5b; a disk binds to the zone of its first pod
@@ -74,7 +79,7 @@ def node_config(n, files):
         if r["name"] in POD_OF and (r.get("addresses") or {}).get("P2P"):
             r["addresses"]["P2P"] = f"{r['name']}:{port(r['addresses']['P2P'])}"
     d = core["fabric"]["default"]
-    sidecar, query = BI_COMMITTER if POD_OF[n] == "rdbi-bi" else OWN_COMMITTER
+    sidecar, query = bi_committer() if POD_OF[n] == "rdbi-bi" else OWN_COMMITTER
     d["peers"][0]["address"] = d["notificationService"]["endpoints"][0]["address"] = sidecar
     d["queryService"]["endpoints"][0]["address"] = query
     ports = {"grpc": port(f["grpc"]["address"]), "p2p": port(f["p2p"]["listenAddress"]), "web": port(f["web"]["address"])}
@@ -154,31 +159,32 @@ def secret(name, data):
             "type": "Opaque", "data": {k: base64.b64encode(v).decode() for k, v in data.items()}}
 
 
-def deployment(pod, replicas, init, containers, volumes):
+def deployment(pod, replicas, init, containers, volumes, restricted=False, extra_init=()):
     labels = {**LABELS, "app.kubernetes.io/name": pod}
     return {"apiVersion": "apps/v1", "kind": "Deployment", "metadata": {"name": pod, "namespace": NS, "labels": labels},
             "spec": {"replicas": replicas, "strategy": {"type": "Recreate"},
                      "selector": {"matchLabels": {"app.kubernetes.io/name": pod}},
                      "template": {"metadata": {"labels": labels}, "spec": {
                          "imagePullSecrets": [{"name": "ghcr-pull"}], "nodeSelector": ZONE,
-                         "initContainers": [{"name": "unpack", "image": IMAGE, "securityContext": {"runAsUser": 0},
+                         "initContainers": [{"name": "unpack", "image": IMAGE, "securityContext": {"runAsUser": 10001 if restricted else 0},
                                              "command": ["sh", "-c", init], "resources": resources("16Mi", "128Mi"),
                                              "volumeMounts": [{"name": "files", "mountPath": "/secret"},
                                                               {"name": "rdbi", "mountPath": "/rdbi"}] +
-                                             ([{"name": "state", "mountPath": "/state"}] if any(v["name"] == "state" for v in volumes) else [])}],
+                                             ([{"name": "state", "mountPath": "/state"}] if any(v["name"] == "state" for v in volumes) else [])}, *extra_init],
                          "containers": containers, "volumes": volumes}}}}
 
 
-def institution(pod, replicas):
-    docs, files, extra = [], set(), {}
-    containers, init = [], "set -e; tar xzf /secret/rdbi.tgz -C /rdbi; chown -R 10001:10001 /rdbi"
+def institution(pod, replicas, restricted=False):
+    """restricted: no root-only steps (PSS restricted namespaces): fsGroup owns the volumes instead of chown."""
+    docs, files, extra, extra_init = [], set(), {}, []
+    containers, init = [], "set -e; tar xzf /secret/rdbi.tgz -C /rdbi" + ("" if restricted else "; chown -R 10001:10001 /rdbi")
     for n in PODS[pod]:
         core, p, query = node_config(n, files)
         extra[f"live/{n}/core.yaml"] = yaml.safe_dump(core, sort_keys=False, width=200).encode()
         docs.append({"apiVersion": "v1", "kind": "Service", "metadata": {"name": n, "namespace": NS, "labels": LABELS},
                      "spec": {"selector": {"app.kubernetes.io/name": pod},
                               "ports": [{"name": k, "port": v, "targetPort": v} for k, v in p.items()]}})
-        init += f"; mkdir -p /state/{n}; chown -R 10001:10001 /state/{n}"
+        init += f"; mkdir -p /state/{n}" + ("" if restricted else f"; chown -R 10001:10001 /state/{n}")
         wait = "; ".join(f"until (: >/dev/tcp/{h}/{p}) 2>/dev/null; do sleep 2; done"
                          for h, p in (a.rsplit(":", 1) for a in (core["fabric"]["default"]["peers"][0]["address"], query)))
         containers.append({
@@ -194,7 +200,13 @@ def institution(pod, replicas):
     if pod in BANK:
         extra.update(committer_files(pod))
         data["db-password"] = db_password(pod).encode()
-        init += "; mkdir -p /state/ledger /state/pgdata; chown 10001:10001 /state/ledger; chown 999:999 /state/pgdata; chmod 700 /state/pgdata"
+        if restricted:  # postgres (uid 999) must own pgdata with mode 700; it can create it inside the fsGroup-writable volume
+            init += "; mkdir -p /state/ledger"
+            extra_init.append({"name": "pgdata", "image": PG_IMAGE, "securityContext": {"runAsUser": 999},
+                               "command": ["sh", "-c", "set -e; mkdir -p /state/pgdata; chmod 700 /state/pgdata"],
+                               "volumeMounts": [{"name": "state", "mountPath": "/state"}], "resources": resources("16Mi", "128Mi")})
+        else:
+            init += "; mkdir -p /state/ledger /state/pgdata; chown 10001:10001 /state/ledger; chown 999:999 /state/pgdata; chmod 700 /state/pgdata"
         pw = lambda var: {"name": var, "valueFrom": {"secretKeyRef": {"name": f"{pod}-files", "key": "db-password"}}}
         cfg = {"name": "rdbi", "mountPath": "/config", "subPath": "committer"}
         for svc in ("verifier", "vc", "coordinator", "sidecar", "query"):
@@ -217,7 +229,7 @@ def institution(pod, replicas):
     volumes = [{"name": "files", "secret": {"secretName": f"{pod}-files", "defaultMode": 0o400}},
                {"name": "rdbi", "emptyDir": {}},
                {"name": "state", "persistentVolumeClaim": {"claimName": f"{pod}-state"}}]
-    docs.append(deployment(pod, replicas, init, containers, volumes))
+    docs.append(deployment(pod, replicas, init, containers, volumes, restricted, extra_init))
     return docs
 
 
@@ -383,6 +395,62 @@ def gateway(n):
              "spec": {"selector": {"app.kubernetes.io/name": name}, "ports": [{"name": "fxapi", "port": 8443, "targetPort": 8443}]}}]
 
 
+ORG_POD = {"bi": "rdbi-bi", "bank-a": "rdbi-bank2", "bank-b": "rdbi-bank3"}  # bank-c (rdbi-bank4) is cluster 2: S18
+AVOID_NODES = ["member-16033-node", "member-16034-node"]  # kubernetes.io/hostname of nodes other work uses (lead, fabricx S2)
+
+
+def redact(docs):
+    """Secret data/stringData and every container env value become "redacted": a render is for review and dry-run, never for apply."""
+    for d in docs:
+        if d["kind"] == "Secret":
+            for field in ("data", "stringData"):
+                if field in d:
+                    d[field] = {k: base64.b64encode(b"redacted").decode() if field == "data" else "redacted" for k in d[field]}
+        if d["kind"] == "Deployment":
+            spec = d["spec"]["template"]["spec"]
+            for c in spec.get("initContainers", []) + spec.get("containers", []):
+                for e in c.get("env", []):
+                    if "value" in e:
+                        e["value"] = "redacted"
+    return docs
+
+
+def render(org, ns):
+    global NS
+    if org not in ORG_POD:
+        sys.exit(f"k8s.py render: org {org!r} is not rendered here; use one of {', '.join(ORG_POD)} (bank-c is cluster 2, S18)")
+    if ns != f"rd-fabricx-{org}":
+        sys.exit(f"k8s.py render: --ns must be rd-fabricx-{org}, got {ns!r}")
+    if not re.search(r"@sha256:[0-9a-f]{64}$", IMAGE):
+        sys.exit("k8s.py render: IMAGE must be pinned by digest (repo@sha256:<64 hex>)")
+    NS = ns
+    docs = institution(ORG_POD[org], 0, restricted=True)  # replicas 0: applying the render starts nothing
+    for d in redact(docs):
+        if d["kind"] == "Deployment":
+            spec = d["spec"]["template"]["spec"]
+            d["spec"]["template"]["metadata"]["labels"]["party"] = org
+            # PSS restricted (label enforce=restricted on rd-fabricx-*): the volumes' group is fsGroup, every container drops ALL
+            spec["securityContext"] = {"runAsNonRoot": True, "seccompProfile": {"type": "RuntimeDefault"}, "fsGroup": 10001}
+            for init, c in [(True, c) for c in spec["initContainers"]] + [(False, c) for c in spec["containers"]]:
+                c["securityContext"] = {**c.get("securityContext", {}), "allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}
+                if c["name"] == "db":
+                    c["securityContext"]["runAsUser"] = 999  # the postgres image user
+                c["securityContext"]["runAsNonRoot"] = True
+                c["resources"]["limits"]["cpu"] = "200m" if init else "1"
+                c["resources"]["requests"]["ephemeral-storage"] = "64Mi"
+                c["resources"]["limits"]["ephemeral-storage"] = "512Mi"
+            spec["affinity"] = {
+                "nodeAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": {"nodeSelectorTerms": [{"matchExpressions": [
+                    {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": AVOID_NODES}]}]}},
+                # soft: a pod of another party on the same node is allowed when no other node fits
+                "podAntiAffinity": {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": 100, "podAffinityTerm": {
+                    "topologyKey": "kubernetes.io/hostname", "namespaceSelector": {},  # all namespaces: the other parties live elsewhere
+                    "labelSelector": {"matchExpressions": [
+                        {"key": "app.kubernetes.io/part-of", "operator": "In", "values": ["rdbi"]},
+                        {"key": "party", "operator": "NotIn", "values": [org]}]}}}]}}
+    print(yaml.safe_dump_all(docs, sort_keys=False), end="")
+
+
 def gw(action, n):
     docs = gateway(n)
     if action == "apply":
@@ -400,6 +468,8 @@ if __name__ == "__main__":
         apply(int(sys.argv[2]) if len(sys.argv) > 2 else 1)
     elif cmd == "seed":
         seed()
+    elif cmd == "render" and len(sys.argv) == 6 and sys.argv[2] == "--org" and sys.argv[4] == "--ns":
+        render(sys.argv[3], sys.argv[5])
     elif cmd == "gw" and len(sys.argv) == 4 and sys.argv[2] in ("render", "apply") and int(sys.argv[3]) in GW_NODE:
         gw(sys.argv[2], int(sys.argv[3]))
     else:
