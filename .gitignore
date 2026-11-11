@@ -8,3 +8,4 @@ cache/
 
 # cluster kubeconfig with a client private key, never commit
 alibaba.yaml
+__pycache__/
