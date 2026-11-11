@@ -11,7 +11,7 @@ sys.path.insert(0, HERE)
 import reenroll_render as rr
 
 IMG = "ghcr.io/example/fsc-reenroll@sha256:" + "7" * 64
-API = "10.200.0.1/32"
+API = "172.24.11.240,172.24.40.81"
 POD = {"bi": "bi", "bank-a": "bank2", "bank-b": "bank3", "bank-c": "bank4"}
 NODES = {"bi": ["issuer", "endorser-1"], "bank-a": ["bank2", "endorser-2"], "bank-b": ["bank3", "endorser-3"], "bank-c": ["bank4", "endorser-4"]}
 
@@ -44,7 +44,7 @@ class Role(unittest.TestCase):
 
 class Job(unittest.TestCase):
     def job(self, party="bank-b", node=None, **kw):
-        a = dict(image=IMG, name="g1", api_cidr=API)
+        a = dict(image=IMG, name="g1", api_ips=API)
         a.update(kw)
         return docs(rr.render_job(party, node or NODES[party][1], **a))
 
@@ -84,13 +84,14 @@ class Job(unittest.TestCase):
         for bad in ("password", "FABRIC_CA_CLIENT_URL", "admin.pass", "fca-org3-admin", "env:"):
             self.assertNotIn(bad, text)
 
-    def test_egress_is_own_ca_api_server_and_dns_only(self):
+    def test_egress_is_own_ca_api_server_endpoints_6443_and_dns_only(self):
         np = by(self.job(), "NetworkPolicy")["spec"]
         self.assertEqual(np["policyTypes"], ["Ingress", "Egress"])
         self.assertNotIn("ingress", np)
         self.assertEqual(np["egress"], [
             {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "fca-org3"}}}], "ports": [{"port": 7054, "protocol": "TCP"}]},
-            {"to": [{"ipBlock": {"cidr": API}}], "ports": [{"port": 443, "protocol": "TCP"}]},
+            {"to": [{"ipBlock": {"cidr": "172.24.11.240/32"}}], "ports": [{"port": 6443, "protocol": "TCP"}]},
+            {"to": [{"ipBlock": {"cidr": "172.24.40.81/32"}}], "ports": [{"port": 6443, "protocol": "TCP"}]},
             {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
 
     def test_modes_add_exactly_one_flag(self):
@@ -122,7 +123,7 @@ class Job(unittest.TestCase):
                     self.assertEqual(src["secretName"], f"rdbi-{POD[p]}-files")
 
     def test_checked_inputs(self):
-        for kw in (dict(image="repo:latest"), dict(name="A B"), dict(api_cidr="0.0.0.0/0"), dict(api_cidr="10.0.0.0/24"), dict(api_cidr="x")):
+        for kw in (dict(image="repo:latest"), dict(name="A B"), dict(api_ips="0.0.0.0"), dict(api_ips="10.0.0.0/24"), dict(api_ips="x"), dict(api_ips=""), dict(api_ips="10.0.0.1,10.0.0.1"), dict(api_ips="300.1.1.1")):
             with self.subTest(kw=kw):
                 with self.assertRaises(SystemExit):
                     self.job(**kw)
@@ -132,7 +133,7 @@ class Job(unittest.TestCase):
             self.job("bank-d", "x")
 
     def test_cli(self):
-        r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "reenroll_render.py"), "job", "bi", "issuer", "--image", IMG, "--name", "g1", "--api-cidr", API], capture_output=True, text=True)
+        r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "reenroll_render.py"), "job", "bi", "issuer", "--image", IMG, "--name", "g1", "--api-ips", API], capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stderr)
         self.assertEqual(sum(1 for d in docs(r.stdout) if d and d["kind"] == "Job"), 1)
 
