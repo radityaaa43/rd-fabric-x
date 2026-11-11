@@ -80,7 +80,8 @@ def opa_config_for(path, party):
     cfg = yaml.safe_load(raw)
     if not cfg.get("keys"):
         die(f"{path} has no `keys:` block (the public keys of the bundle owners; opa/keys.sh)")
-    cfg["services"] = {"bundle-server": {"url": f"http://bundle-server.rd-zeto-{party}.svc.cluster.local:8080"}}
+    # the Service port is 80 (Service bundle-server: bundles port=80 targetPort=8080, sink 8081); naming the pod port 8080 hangs the bundle request (S16 bank-b)
+    cfg["services"] = {"bundle-server": {"url": f"http://bundle-server.rd-zeto-{party}.svc.cluster.local"}}
     cfg["decision_logs"] = {"console": True, **{k: v for k, v in cfg.get("decision_logs", {}).items() if k not in ("service", "console")}}
     cfg["status"] = {"console": True}
     return yaml.safe_dump(cfg, sort_keys=False)
