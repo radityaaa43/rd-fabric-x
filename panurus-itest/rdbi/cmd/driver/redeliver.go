@@ -145,22 +145,39 @@ func (r *redeliverer) tick() {
 		}
 		ids = r.dueIDs()
 	}
-	for _, tx := range ids {
-		out := r.f.deliver(tx)
-		r.note(tx, out)
-		switch {
-		case delivered(out):
-			r.f.logf("redeliver %.12s: %s", tx, out)
-		case strings.HasPrefix(out, "not delivered"): // transport failure: BI is gone again, stop this tick
-			r.f.logf("redeliver %.12s: %s, stopping tick", tx, out)
-			return
-		default: // BI answered but did not record it (e.g. an earlier report is missing): count it, the others go on
-			if n, dropped := r.refuse(tx); dropped {
-				r.f.logf("redeliver %.12s: refused by BI %d times (%s), giving up; `op: report` retries it", tx, n, out)
-			} else {
-				r.f.logf("redeliver %.12s: refused by BI (%s), attempt %d of %d", tx, out, n, maxRefusals)
+	for {
+		ok, refused := 0, []string{}
+		for _, tx := range ids {
+			out := r.f.deliver(tx)
+			r.note(tx, out)
+			switch {
+			case delivered(out):
+				ok++
+				r.f.logf("redeliver %.12s: %s", tx, out)
+			case strings.HasPrefix(out, "not delivered"): // transport failure: BI is gone again, stop this tick
+				r.f.logf("redeliver %.12s: %s, stopping tick", tx, out)
+				return
+			default: // BI answered but did not record it (e.g. an earlier report is missing)
+				refused = append(refused, tx)
+				r.f.logf("redeliver %.12s: refused by BI (%s)", tx, out)
 			}
 		}
+		if len(refused) == 0 {
+			return
+		}
+		if ok > 0 { // progress: an earlier report may now be in, so the refused ones get another pass in this tick
+			ids = refused
+			continue
+		}
+		// a pass without progress: only now does a refusal count, once per tx and tick
+		for _, tx := range refused {
+			if n, dropped := r.refuse(tx); dropped {
+				r.f.logf("redeliver %.12s: refused by BI %d times, giving up; `op: report` retries it", tx, n)
+			} else {
+				r.f.logf("redeliver %.12s: refusal %d of %d", tx, n, maxRefusals)
+			}
+		}
+		return
 	}
 }
 
