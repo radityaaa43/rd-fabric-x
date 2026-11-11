@@ -207,6 +207,8 @@ class Network(Base):
         a = s["metadata"]["annotations"]
         self.assertEqual(a["service.beta.kubernetes.io/alibaba-cloud-loadbalancer-acl-id"], "acl-d9ji5nwbqutwulof33ydb")
         self.assertEqual(a["service.beta.kubernetes.io/alibaba-cloud-loadbalancer-acl-status"], "on")
+        self.assertEqual(a["service.beta.kubernetes.io/backend-type"], "eni")   # the S10b shape (a choice, not a proven dependency of the ACL)
+        self.assertEqual(a["service.beta.kubernetes.io/alibaba-cloud-loadbalancer-acl-type"], "white")
         self.assertEqual(sorted(p["port"] for p in s["spec"]["ports"]), [tcr.GRPC["bank2"] + 1, tcr.GRPC["endorser-2"] + 1])
         self.assertEqual(s["spec"]["selector"], {"app.kubernetes.io/name": "rdbi-bank2"})
         for bad in ({"acl_id": "x", "ranges": ["1.2.3.4/32"]}, {"acl_id": "acl-abc", "ranges": []}, {"acl_id": "acl-abc", "ranges": ["1.2.3.0/24"]}):

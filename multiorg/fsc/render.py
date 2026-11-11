@@ -179,7 +179,8 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
         if not ranges or any(not re.fullmatch(r"\d+\.\d+\.\d+\.\d+/32", r) for r in ranges):
             die("--p2p-lb-range must be one or more <ipv4>/32 (nothing wider)")
         docs.append({"apiVersion": "v1", "kind": "Service",
-                     "metadata": {**meta(f"rdbi-p2p-{pod}"), "annotations": {A + "acl-status": "on", A + "acl-id": acl, A + "acl-type": "white", A + "address-type": "internet", A + "scheduler": "wrr"}},
+                     "metadata": {**meta(f"rdbi-p2p-{pod}"), "annotations": {A + "acl-status": "on", A + "acl-id": acl, A + "acl-type": "white", A + "address-type": "internet", A + "scheduler": "wrr",
+                                                                    "service.beta.kubernetes.io/backend-type": "eni"}},
                      "spec": {"type": "LoadBalancer", "externalTrafficPolicy": "Cluster", "loadBalancerSourceRanges": ranges, "selector": pl,
                               "ports": [{"name": f"p2p-{x}", "port": p2p_ports[x][1], "targetPort": p2p_ports[x][1], "protocol": "TCP"} for x in nodes]}})
     return yaml.safe_dump_all(docs, sort_keys=False)
