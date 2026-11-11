@@ -76,8 +76,12 @@ type dueTx struct {
 	refused int // times BI answered but did not record it
 }
 
-// maxRefusals bounds the retries of a report BI keeps refusing (a refusal for a missing earlier report is
-// transient, a forged or altered one never succeeds): after that the tx is dropped and only `op: report` retries it.
+// maxRefusals bounds the retries of a report BI keeps refusing. Why not drop at the first refusal: BI needs the
+// reports in causal order ("a refused report is simply sent again later", rdbi/report/report.go:11-13), so a report
+// that goes out before its prerequisite is refused only transiently, and after an outage dependent reports (a
+// transfer that spends the change of the one before) are the normal case. A forged or altered report is refused
+// every time: after maxRefusals tries it is dropped, and only `op: report` retries it. Reports are sent in arrival
+// order, so the prerequisite usually goes first.
 const maxRefusals = 5
 
 func delivered(outcome string) bool { return outcome == rep.Recorded || outcome == rep.AlreadyRecorded }
