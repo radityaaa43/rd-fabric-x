@@ -5,7 +5,7 @@ usage: render.py bi|bank-a|bank-b|bank-c --templates <live dir with <node>/clien
                  --image repo@sha256:HEX (rdbi-node: fxapi) --envoy-image repo@sha256:HEX --opa-image repo@sha256:HEX
                  --tls-exchange DIR (org1..org4/msp/tlscacerts/*.pem: ONE root CA per org, public) --opa-config FILE (opa.yaml + the PUBLIC `keys:` block, ~/.opa-keys/opa-config.yaml) --gw-cert FILE (public cert of identity <node>-gw)
                  --gw-ips FILE ({cluster1:{N: addr}, cluster2:{N: addr}}: address of each gateway for peers in the OTHER cluster)
-                 [--lb-acl acl-ID --lb-range <ipv4>/32 ...]
+                 [--lb-acl acl-ID --lb-range <ipv4>/32 ...] [--public-params FILE (bi only: for the one-off `rdbi-driver setup-pp`)]
 Objects: ConfigMaps fx-gw-<N>-envoy, fx-gw-<N>-opa, fx-gw-<N>-client (client-config.yaml of the gateway's node, gateway cert, issuer-identity.bin for bi only),
 Services fx-gw-<N> (ClusterIP 8443), fx-gw-<N>-ext (NodePort, eTP Cluster, cluster-1 parties only: the Lensa path, like zeto bank-gw-<N>-ext) and one ExternalName `fx-gw-<M>` per same-cluster peer (the driver dials https://fx-gw-<M>:8443/, serve.go:43), NetworkPolicy fx-gw-<N> (ingress 8443 from any source, like zeto bank-gw-ingress: mTLS + OPA are the control),
 Deployment fx-gw-<N> (envoy :8443 mTLS + ext_authz to OPA 127.0.0.1:9191, OPA bundles from the SAME party's zeto bundle-server read side only, fxapi `rdbi-driver serve <node>`).
@@ -86,7 +86,7 @@ def opa_config_for(path, party):
     return yaml.safe_dump(cfg, sort_keys=False)
 
 
-def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert, gw_ips, tls_exchange, lb=None):
+def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert, gw_ips, tls_exchange, lb=None, public_params=None):
     if party not in PARTY_N:
         die(f"party {party!r} must be one of {', '.join(PARTY_N)}")
     for what, v in (("--image", image), ("--envoy-image", envoy_image), ("--opa-image", opa_image)):
@@ -111,6 +111,13 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
             die(f"{ip} is missing: the issuer gateway ships the public issuer identity")
         client["binaryData"] = {"issuer-identity.bin": base64.b64encode(open(ip, "rb").read()).decode()}
         live_items.append({"key": "issuer-identity.bin", "path": "live/issuer-identity.bin"})
+        if public_params:   # S14: `rdbi-driver setup-pp` reads $HOME/.fabricx-token/live/public-params.bin; public data, shipped only for the one-off call on BI's gateway
+            if not os.path.isfile(public_params):
+                die(f"--public-params {public_params} is not a file")
+            client["binaryData"]["public-params.bin"] = base64.b64encode(open(public_params, "rb").read()).decode()
+            live_items.append({"key": "public-params.bin", "path": "live/public-params.bin"})
+    elif public_params:
+        die("--public-params is for the BI gateway only (the issuer node installs the public parameters)")
 
     roots = {}   # D4: fxapi pins each peer gateway to ITS org's root, so /peer holds ca-<M>.crt per org (never a bundle)
     for m in (1, 2, 3, 4):
@@ -204,12 +211,13 @@ def main():
     for o in ("templates", "image", "envoy-image", "opa-image", "opa-config", "gw-cert", "gw-ips", "tls-exchange", "lb-acl"):
         ap.add_argument(f"--{o}")
     ap.add_argument("--lb-range", action="append", default=[])
+    ap.add_argument("--public-params")
     a = ap.parse_args()
     for o in ("templates", "image", "envoy_image", "opa_image", "opa_config", "gw_cert", "gw_ips", "tls_exchange"):
         if not getattr(a, o):
             die(f"--{o.replace('_', '-')} is required")
     lb = {"acl_id": a.lb_acl, "ranges": a.lb_range} if a.lb_acl else None
-    sys.stdout.write(render(a.party, a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, a.gw_cert, a.gw_ips, a.tls_exchange, lb))
+    sys.stdout.write(render(a.party, a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, a.gw_cert, a.gw_ips, a.tls_exchange, lb, a.public_params))
 
 
 if __name__ == "__main__":

@@ -255,6 +255,23 @@ class GwRender(unittest.TestCase):
         with self.assertRaises(SystemExit):
             build(self.root, "bi")
 
+    def test_public_params_are_shipped_for_bi_only_and_only_on_request(self):
+        pp = f"{self.root}/pp.bin"
+        with open(pp, "wb") as f:
+            f.write(b"\x00PP\xffparams")
+        bi = by(build(self.root, "bi", public_params=pp), "ConfigMap", "fx-gw-1-client")
+        self.assertEqual(__import__("base64").b64decode(bi["binaryData"]["public-params.bin"]), b"\x00PP\xffparams")
+        self.assertIn("issuer-identity.bin", bi["binaryData"])   # next to it, unchanged
+        dep = by(build(self.root, "bi", public_params=pp), "Deployment", "fx-gw-1")
+        live = [v for v in dep["spec"]["template"]["spec"]["volumes"] if v["name"] == "live"][0]["projected"]["sources"][0]["configMap"]["items"]
+        self.assertIn({"key": "public-params.bin", "path": "live/public-params.bin"}, live)
+        self.assertNotIn("public-params.bin", by(build(self.root, "bi"), "ConfigMap", "fx-gw-1-client").get("binaryData", {}))   # off by default
+        for p in ("bank-a", "bank-b", "bank-c"):
+            with self.assertRaises(SystemExit):
+                build(self.root, p, public_params=pp)
+        with self.assertRaises(SystemExit):
+            build(self.root, "bi", public_params=f"{self.root}/missing.bin")
+
     def test_peer_names(self):
         # cluster 1 parties: same-cluster peers by ExternalName Service, bank-c (cluster 2) by hostAliases with the --gw-ips address
         for p in ("bi", "bank-a", "bank-b"):

@@ -22,6 +22,9 @@ ConfigMaps `fx-gw-<N>-envoy`, `fx-gw-<N>-opa`, `fx-gw-<N>-client`; Services `fx-
 
 `enroll_gw.py <party> rd-fabricx-<party> --kubeconfig K --ca-url http://localhost:7054 --work /dev/shm/W --tls-exchange <exchange-s8e> --lensa-ca <public ca.crt FILE> --out <new dir>/org<N>`: the three identities are registered at the org's own CA, one `kubectl create` of the four Secrets, public tree `gw/{<node>-gw,fx-gw-<N>,fx-gw-<N>-peer}.pem` + MANIFEST. The Lensa CA is a FILE (besu hands the public `ca.crt` of `bank-gw-ca-<N>`, sha256 quoted on both sides); this tool never reads a Secret. Rehearsed against a real fabric-ca-server 1.5.22 (throwaway CA): the tls-profile certs verify (`-purpose sslserver` and `sslclient`, both EKU), SAN `fx-gw-<N>` + `fx-gw-<N>.<ns>.svc.cluster.local`, keys match the certs.
 
+## Public parameters for the one-off `setup-pp` (S14, bi only)
+`--public-params FILE` (refused for any other party) ships the public parameters in `fx-gw-1-client` (binaryData `public-params.bin`, mounted at `live/public-params.bin`), where `rdbi-driver setup-pp` reads them (`cmd/driver/main.go:363-366`). The file is public data: record its sha256 and read it back from the ConfigMap. The current 64-bit file `~/.fabricx-token/live/public-params.bin` is sha256 `1ebcdbd0737d2248b0ff8e1555f6736c2a5c1f1b53e519c5e8fd242cc29c84d5` (`rdbi-ppgen`: precision 64, max token 18446744073709551615, issuers 1, auditors 0).
+
 ## Why peers work without a driver change
 The driver dials `https://fx-gw-<M>:8443/` (`serve.go:43`, hardcoded). Same-cluster peers resolve through ExternalName Services, cross-cluster peers through `hostAliases` (`--gw-ips`). The SAN `fx-gw-<M>` still matches.
 
