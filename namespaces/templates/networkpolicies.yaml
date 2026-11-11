@@ -25,7 +25,9 @@ metadata:
   name: allow-dns-egress
   namespace: ${NS}
 spec:
-  podSelector: {}
+  podSelector:
+    matchExpressions:
+      - {key: rd/egress-locked, operator: DoesNotExist}  # pods labelled rd/egress-locked (S14 Jobs holding key Secrets) get only their own policy's egress
   policyTypes: [Egress]
   egress:
     - {}  # L0: egress open to anything; name kept for parity with zeto, tightened at S11/S13

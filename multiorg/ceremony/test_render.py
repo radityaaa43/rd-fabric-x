@@ -172,5 +172,62 @@ class Job(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
 
 
+LOCK = "rd/egress-locked"
+
+
+class Locked(Base):
+    """R16 (option iv): the namespace policy allow-dns-egress skips pods labelled rd/egress-locked, so a Job's own narrow policy is the ONLY egress it gets."""
+
+    def probe(self, party="bi", **kw):
+        a = dict(image=IMG, name="p1", tries=["ext=1.1.1.1:443"], allow=[])
+        a.update(kw)
+        return list(yaml.safe_load_all(render.render_probe(party, **a)))
+
+    def test_endorse_job_pod_is_labelled(self):
+        for p in PARTIES:
+            self.assertEqual(self.by(self.job(p), "Job")["spec"]["template"]["metadata"]["labels"][LOCK], "true")
+
+    def test_job_mounting_a_secret_without_the_label_fails(self):
+        docs = self.job("bi")
+        job = self.by(docs, "Job")
+        del job["spec"]["template"]["metadata"]["labels"][LOCK]
+        with self.assertRaises(SystemExit):
+            render.check_locked(docs)
+        render.check_locked(self.job("bi"))
+
+    def test_probe_job_is_labelled_mounts_no_secret_and_has_its_own_policy(self):
+        docs = self.probe(allow=["pod=orderer-router-1:8013", "dns"])
+        job, np = self.by(docs, "Job"), self.by(docs, "NetworkPolicy")
+        pod = job["spec"]["template"]
+        self.assertEqual(pod["metadata"]["labels"][LOCK], "true")
+        self.assertNotIn("volumes", pod["spec"])   # no volume at all, so no Secret
+        self.assertEqual(np["spec"]["policyTypes"], ["Ingress", "Egress"])
+        self.assertNotIn("ingress", np["spec"])
+        for k, v in np["spec"]["podSelector"]["matchLabels"].items():
+            self.assertEqual(pod["metadata"]["labels"][k], v)
+        self.assertEqual(np["spec"]["egress"], [
+            {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "orderer-router-1"}}}], "ports": [{"port": 8013, "protocol": "TCP"}]},
+            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
+
+    def test_probe_without_allow_has_no_egress_rules(self):
+        np = self.by(self.probe(), "NetworkPolicy")
+        self.assertNotIn("egress", np["spec"])
+
+    def test_probe_command_tries_each_target_and_is_bounded(self):
+        c = self.by(self.probe(tries=["ext=1.1.1.1:443", "api=kubernetes.default.svc:443"]), "Job")["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(c["command"][:2], ["bash", "-c"])
+        self.assertEqual(c["command"][3:], ["probe", "ext=1.1.1.1:443", "api=kubernetes.default.svc:443"])
+        self.assertIn("timeout 4", c["command"][2])
+        self.assertEqual(self.by(self.probe(), "Job")["spec"]["activeDeadlineSeconds"], 120)
+
+    def test_probe_args_are_checked(self):
+        for kw in (dict(tries=["bad"]), dict(tries=[]), dict(allow=["pod=x"]), dict(allow=["pod=a:70000"]), dict(allow=["any"]), dict(name="X Y"), dict(image="repo:latest")):
+            with self.subTest(kw=kw):
+                with self.assertRaises(SystemExit):
+                    self.probe(**kw)
+        with self.assertRaises(SystemExit):
+            self.probe("bank-d")
+
+
 if __name__ == "__main__":
     unittest.main()

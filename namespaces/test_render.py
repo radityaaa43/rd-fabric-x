@@ -35,8 +35,10 @@ def check(docs, party, cluster=None):
     deny = by["NetworkPolicy"]["default-deny-ingress"]["spec"]
     assert deny["podSelector"] == {} and deny["policyTypes"] == ["Ingress"] and "ingress" not in deny, deny
     dns = by["NetworkPolicy"]["allow-dns-egress"]["spec"]
-    assert "Egress" in dns["policyTypes"] and dns["podSelector"] == {}, dns
-    assert dns["egress"] == [{}], dns  # L0: egress open to anything (lead decision, tightened at S11/S13)
+    assert "Egress" in dns["policyTypes"], dns
+    # R16 (option iv): the open-egress policy skips pods labelled rd/egress-locked, so a Job's own narrow egress policy binds (K8s policies are additive)
+    assert dns["podSelector"] == {"matchExpressions": [{"key": "rd/egress-locked", "operator": "DoesNotExist"}]}, dns
+    assert dns["egress"] == [{}], dns  # L0 for every unlabelled pod: unchanged (lead decision, tightened at S11/S13)
     same = by["NetworkPolicy"]["allow-same-namespace"]["spec"]
     assert same["policyTypes"] == ["Ingress"] and same["ingress"] == [{"from": [{"podSelector": {}}]}], same
     rb = by["RoleBinding"][SA]

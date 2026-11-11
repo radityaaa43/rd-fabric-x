@@ -3,11 +3,16 @@
 
 usage: render.py role <party>
        render.py job <party> --tx FILE --cacert FILE --image repo@sha256:HEX --tx-name NAME
+       render.py probe <party> --image repo@sha256:HEX --name NAME --try LABEL=HOST:PORT ... [--allow pod=APP:PORT | --allow dns ...]
 `role`: Role s14-sign + RoleBinding in rd-fabricx-<party>: jobs create+get, pods get, pods/log get, bound to the org's own party-admin ServiceAccount only. TIME-BOXED: created right before the
 org's signing and removed right after its Job completed (both logged in R13). party-admin cannot create a Role, so the operator creates it (R13).
 `job`: ServiceAccount s14-signer (no token), ConfigMap s14-in-<NAME> (tx.json, the PUBLIC org CA cert, config.yaml for fxconfig), NetworkPolicy denying all traffic of the pod, Job s14-endorse-<NAME>:
 one container of the tools image (digest) runs `fxconfig tx endorse /w/tx.json` and prints the partly signed tx to its log; the org's admin identity comes from the EXISTING Secret
 orderer-admin-<N>-secret (keystore + signcert only) projected next to the ConfigMap items; nothing else is mounted. The key never leaves the namespace.
+EGRESS (R16): the namespace policy allow-dns-egress selects every pod WITHOUT the label rd/egress-locked and allows all egress, and K8s policies are additive. Every Job pod that mounts a
+Secret therefore carries rd/egress-locked=true (check_locked refuses a render without it), so its own NetworkPolicy is the only egress it gets.
+`probe`: a Job that mounts NO Secret, carries the label and tries TCP connects (bash /dev/tcp, 4 s each), printing `LABEL HOST:PORT OPEN|CLOSED`; its own policy allows only the --allow entries
+(pod=<app.kubernetes.io/name>:<port> in the same namespace, dns = kube-system :53). It proves the policy binds before any key-holding Job relies on it.
 """
 import argparse, re, sys
 import yaml
@@ -15,6 +20,7 @@ import yaml
 PARTY_N = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
 LABELS = {"app.kubernetes.io/part-of": "rd-fabricx"}
 UID = 10001
+LOCK = "rd/egress-locked"
 
 
 def die(msg):
@@ -40,6 +46,17 @@ def render_role(party):
          "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "s14-sign"}}], sort_keys=False)
 
 
+def check_locked(docs):
+    """Refuse a render where a Job pod mounts a Secret but lacks the egress-lock label (R16)."""
+    for d in docs:
+        if d["kind"] != "Job":
+            continue
+        pod = d["spec"]["template"]
+        mounts = any("secret" in v or any("secret" in src for src in v.get("projected", {}).get("sources", [])) for v in pod["spec"].get("volumes", []))
+        if mounts and pod["metadata"]["labels"].get(LOCK) != "true":
+            die(f"Job {d['metadata']['name']} mounts a Secret but its pod lacks the label {LOCK}=true: allow-dns-egress would leave its egress open")
+
+
 def public_file(path, what):
     t = open(path).read()
     if "PRIVATE KEY" in t:
@@ -54,7 +71,7 @@ def render_job(party, tx, cacert, image, tx_name):
     if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,28}[a-z0-9])?", tx_name or ""):
         die("--tx-name must be 1-30 chars of [a-z0-9-]")
     cm_name, job_name = f"s14-in-{tx_name}", f"s14-endorse-{tx_name}"
-    pl = {**LABELS, "app.kubernetes.io/name": "s14-endorse"}
+    pl = {**LABELS, "app.kubernetes.io/name": "s14-endorse", LOCK: "true"}
     meta = lambda name, extra=None: {"name": name, "namespace": ns, "labels": {**LABELS, **(extra or {})}}
     cm = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(cm_name),
           "data": {"tx.json": public_file(tx, "--tx"), "ca.pem": public_file(cacert, "--cacert"),
@@ -76,18 +93,61 @@ def render_job(party, tx, cacert, image, tx_name):
                                         "securityContext": sec, "volumeMounts": [{"name": "w", "mountPath": "/w", "readOnly": True}],
                                         "resources": {"requests": {"cpu": "20m", "memory": "32Mi", "ephemeral-storage": "8Mi"}, "limits": {"cpu": "500m", "memory": "128Mi", "ephemeral-storage": "16Mi"}}}],
                         "volumes": [vol]}}}}
+    check_locked([job])
     return yaml.safe_dump_all([cm, sa, np, job], sort_keys=False)
+
+
+def egress_rule(spec):
+    if spec == "dns":
+        return {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}
+    m = re.fullmatch(r"pod=([a-z0-9]([a-z0-9-]*[a-z0-9])?):(\d{1,5})", spec)
+    if not m or not 0 < int(m.group(3)) < 65536:
+        die(f"--allow {spec!r} must be dns or pod=<app.kubernetes.io/name>:<port 1-65535>")
+    return {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": m.group(1)}}}], "ports": [{"port": int(m.group(3)), "protocol": "TCP"}]}
+
+
+def render_probe(party, image, name, tries, allow):
+    n, ns = check(party)
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image or ""):
+        die("--image must be pinned by digest (repo@sha256:<64 hex>)")
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,28}[a-z0-9])?", name or ""):
+        die("--name must be 1-30 chars of [a-z0-9-]")
+    if not tries or not all(re.fullmatch(r"[a-z0-9-]+=[A-Za-z0-9.-]+:\d{1,5}", t) for t in tries):
+        die("--try must be LABEL=HOST:PORT, at least one")
+    app = f"s14-probe-{name}"
+    pl = {**LABELS, "app.kubernetes.io/name": app, LOCK: "true"}
+    meta = lambda nm, extra=None: {"name": nm, "namespace": ns, "labels": {**LABELS, **(extra or {})}}
+    np = {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(f"{app}-egress"),
+          "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": app}}, "policyTypes": ["Ingress", "Egress"]}}
+    if allow:
+        np["spec"]["egress"] = [egress_rule(a) for a in allow]
+    script = 'for t in "$@"; do n=${t%%=*}; hp=${t#*=}; if timeout 4 bash -c "exec 3<>/dev/tcp/${hp%:*}/${hp##*:}" 2>/dev/null; then echo "$n $hp OPEN"; else echo "$n $hp CLOSED"; fi; done'
+    sec = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}, "runAsNonRoot": True, "runAsUser": UID}
+    job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta(app, {"app.kubernetes.io/name": app}),
+           "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 120, "ttlSecondsAfterFinished": 900,
+                    "template": {"metadata": {"labels": pl}, "spec": {
+                        "serviceAccountName": "s14-signer", "automountServiceAccountToken": False, "restartPolicy": "Never",
+                        "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "fsGroup": UID, "seccompProfile": {"type": "RuntimeDefault"}},
+                        "imagePullSecrets": [{"name": "ghcr-pull"}],
+                        "containers": [{"name": "probe", "image": image, "command": ["bash", "-c", script, "probe", *tries], "securityContext": sec,
+                                        "resources": {"requests": {"cpu": "20m", "memory": "32Mi", "ephemeral-storage": "8Mi"}, "limits": {"cpu": "200m", "memory": "64Mi", "ephemeral-storage": "16Mi"}}}]}}}}
+    check_locked([job])
+    return yaml.safe_dump_all([np, job], sort_keys=False)
 
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("what", choices=["role", "job"])
+    ap.add_argument("what", choices=["role", "job", "probe"])
     ap.add_argument("party")
-    for o in ("tx", "cacert", "image", "tx-name"):
+    for o in ("tx", "cacert", "image", "tx-name", "name"):
         ap.add_argument(f"--{o}")
+    ap.add_argument("--try", dest="tries", action="append", default=[])
+    ap.add_argument("--allow", action="append", default=[])
     a = ap.parse_args()
     if a.what == "role":
         sys.stdout.write(render_role(a.party))
+    elif a.what == "probe":
+        sys.stdout.write(render_probe(a.party, a.image, a.name, a.tries, a.allow))
     else:
         for o in ("tx", "cacert", "image", "tx_name"):
             if not getattr(a, o):
