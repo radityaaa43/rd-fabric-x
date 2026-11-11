@@ -2,11 +2,11 @@
 """Enroll one party's four Arma roles at its own fca-org<N> and keep the keys only as Secrets (fabricx S9).
 
 usage: enroll.py init   <party> rd-fabricx-<party> --kubeconfig K --work W
-       enroll.py enroll <party> rd-fabricx-<party> --kubeconfig K --ca-url http://localhost:7054 --work W --out exchange/org<N> [--extra-san <host|ip> | --extra-san <role>=<host|ip>]...
+       enroll.py enroll <party> rd-fabricx-<party> --kubeconfig K --ca-url http://localhost:7054 --work W --out exchange/org<N> [--extra-san <host|ip> | --extra-san <role>=<host|ip>]... [--generation TAG]
 One org at a time (sequential): W under /dev/shm only (tmpfs, umask 077 set by the script); destroy W before the next org starts.
 init creates the admin password Secret (apply render.py's CA manifest after it). enroll runs `fabric-ca-client` (msp + tls profile)
 per role, writes Secrets `orderer-<role>-<N>-secret` with `kubectl create`, builds the public exchange tree, runs check_exchange,
-then shreds W. `init` leaves admin.pass in W until `enroll` runs: if enroll never runs, shred W by hand. Private keys exist in W only between enroll and the Secret create: run it on the org's own host.
+then shreds W. `--generation TAG` (B3-SAN re-issue): role identities are registered as `<role>-<N>-TAG` (the first-run secrets were never stored and identities cannot be removed) and the SAME Secret names are overwritten with `kubectl replace`; it needs the CA admin password in W/admin.pass (see RUNBOOK-S9 section 9). `init` leaves admin.pass in W until `enroll` runs: if enroll never runs, shred W by hand. Private keys exist in W only between enroll and the Secret create: run it on the org's own host.
 NOT run live yet: fabric-ca-client is not installed on the build host; the flow is a CLUSTER-OP step (GO B).
 """
 import glob, hashlib, os, re, shutil, subprocess, sys
@@ -70,6 +70,12 @@ def parse_extra_sans(items):
             if san not in out[r]:
                 out[r].append(san)
     return out
+
+
+def check_generation(g):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,11}", g):
+        sys.exit(f"enroll.py: --generation {g!r} must match [a-z0-9][a-z0-9-]{{0,11}}")
+    return g
 
 
 def first(pattern):
@@ -149,7 +155,7 @@ def init(party, ns, kubeconfig, work):
     sh("kubectl", "--kubeconfig", kubeconfig, "-n", ns, "create", "secret", "generic", f"fca-org{n}-admin", f"--from-file=password={p}")
 
 
-def enroll(party, ns, kubeconfig, ca_url, work, out, extra_sans=()):
+def enroll(party, ns, kubeconfig, ca_url, work, out, extra_sans=(), generation="", replace_secrets=None):
     """needs `kubectl --kubeconfig K -n NS port-forward svc/fca-org<N> 7054` running (party-admin Role: pods/portforward).
     Credentials travel only in the fabric-ca-client environment (FABRIC_CA_CLIENT_URL), never on a command line.
     [unverified live] that the client reads FABRIC_CA_CLIENT_URL and prints `Password: <x>` on a register without --id.secret
@@ -157,6 +163,8 @@ def enroll(party, ns, kubeconfig, ca_url, work, out, extra_sans=()):
     n = check_target(party, ns)
     work = check_work(work)
     sans = parse_extra_sans(extra_sans)
+    gen = check_generation(generation) if generation else ""
+    replace_secrets = bool(gen) if replace_secrets is None else replace_secrets
     secrets = []
     try:
         pw = read(f"{work}/admin.pass").strip()
@@ -167,7 +175,7 @@ def enroll(party, ns, kubeconfig, ca_url, work, out, extra_sans=()):
         sh("fabric-ca-client", "enroll", "-M", adminmsp, env=creds("admin", pw), secrets=secrets)
         hosts = {r: f"{r}-{n}.{ns}.svc.cluster.local" for r in ROLES}
         for role in ROLES:
-            who = f"{role}-{n}"
+            who = f"{role}-{n}" + (f"-{gen}" if gen else "")   # B3-SAN: old secrets are gone and identities cannot be removed
             reg = sh("fabric-ca-client", "register", "-u", ca_url, "-M", adminmsp, "--id.name", who, "--id.type", "orderer",
                      env=base_env, secrets=secrets)
             m = re.search(r"Password:\s*(\S+)", reg)
@@ -178,7 +186,7 @@ def enroll(party, ns, kubeconfig, ca_url, work, out, extra_sans=()):
             sh("fabric-ca-client", "enroll", "-M", f"{work}/enrolled/{role}/tls", "--enrollment.profile", "tls", "--csr.hosts", ",".join([hosts[role], *sans[role]]),
                env=creds(who, m.group(1)), secrets=secrets)
         for s in build(f"{work}/enrolled", out, n, ns, hosts):   # create, never apply: party-admin may create/update/patch secrets but not get
-            sh("kubectl", "--kubeconfig", kubeconfig, "create", "-f", "-", stdin=yaml.safe_dump(s), secrets=secrets)
+            sh("kubectl", "--kubeconfig", kubeconfig, "replace" if replace_secrets else "create", "-f", "-", stdin=yaml.safe_dump(s), secrets=secrets)
         found = check_exchange.problems(out, n)
         if found:
             sys.exit("enroll.py: exchange tree is not clean:\n" + "\n".join(found))
@@ -204,7 +212,7 @@ if __name__ == "__main__":
         if cmd == "init":
             init(party, ns, opt["--kubeconfig"], opt["--work"])
         elif cmd == "enroll":
-            enroll(party, ns, opt["--kubeconfig"], opt["--ca-url"], opt["--work"], opt["--out"], sans)
+            enroll(party, ns, opt["--kubeconfig"], opt["--ca-url"], opt["--work"], opt["--out"], sans, opt.get("--generation", ""))
         else:
             raise IndexError
     except (IndexError, KeyError):
