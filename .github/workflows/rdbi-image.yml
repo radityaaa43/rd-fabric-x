@@ -87,11 +87,13 @@ jobs:
           tags: ghcr.io/${{ github.repository_owner }}/rdbi-node-ci:sha-${{ github.sha }}
           sbom: true
           provenance: mode=max
-      - uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+      # GAP (recorded): GitHub offers signed attestations only for public or organization-owned private repositories; this repository is user-owned and private (run 43083952563: 'Feature not available for user-owned private repositories'), so there is no signed attestation. The BuildKit SLSA provenance (mode=max) and the SPDX SBOM are attached to the image by the push step.
+      - if: ${{ github.event.repository.private == false }}
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/rdbi-node-ci
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
       - name: Report the digest
         run: |
-          echo "image: ghcr.io/${{ github.repository_owner }}/rdbi-node-ci@${{ steps.build.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          { echo "image: ghcr.io/${{ github.repository_owner }}/rdbi-node-ci@${{ steps.build.outputs.digest }}"; echo "SBOM + BuildKit provenance attached; no signed attestation (private user repository)"; } | tee -a "$GITHUB_STEP_SUMMARY"
