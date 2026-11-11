@@ -98,6 +98,22 @@ class Build(unittest.TestCase):
         with self.assertRaises(SystemExit):
             self.run_build()
 
+    def test_cli_requires_heads(self):
+        # a real build without the announced hashes would skip the check: the CLI refuses it
+        args = [sys.executable, os.path.join(HERE, "build_genesis.py"), "--exchange", self.ex, "--armageddon", self.arma,
+                "--sample-config", self.sample, "--out", self.out]
+        r = subprocess.run(args, capture_output=True, text=True, env={**os.environ})
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIn("--heads", r.stderr + r.stdout)
+        self.assertFalse(os.path.exists(os.path.join(self.log, "argv.log")))
+        heads = ",".join(f"{n}={hashlib.sha256(open(os.path.join(self.ex, f'org{n}', 'MANIFEST.sha256'), 'rb').read()).hexdigest()}" for n in (1, 2, 3, 4))
+        r = subprocess.run(args + ["--heads", heads], capture_output=True, text=True, env={**os.environ})
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("sha256", r.stdout)
+        os.makedirs(self.out + "2")
+        r = subprocess.run(args[:-1] + [self.out + "2", "--heads", "1=" + "0" * 64 + ",2=x"], capture_output=True, text=True)
+        self.assertNotEqual(r.returncode, 0)                                              # incomplete or wrong heads
+
     def test_expected_manifest_hash_mismatch_refused(self):
         heads = {n: hashlib.sha256(open(os.path.join(self.ex, f"org{n}", "MANIFEST.sha256"), "rb").read()).hexdigest() for n in (1, 2, 3, 4)}
         self.run_build(manifest_heads=heads)
