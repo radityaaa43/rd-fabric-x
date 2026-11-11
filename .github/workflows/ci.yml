@@ -41,3 +41,21 @@ jobs:
         with:
           persist-credentials: false
       - run: python3 -m pip install pyyaml==6.0.1 && python3 -m unittest discover -s multiorg && python3 -m unittest discover -s multiorg/fca && python3 -m unittest discover -s multiorg/s10 && python3 -m unittest discover -s multiorg/lb && python3 -m unittest discover -s multiorg/arma && python3 -m unittest discover -s multiorg/gw && python3 -m unittest discover -s multiorg/ceremony
+  multiorg-fsc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: fabric-ca-client v1.5.22 (pinned tarball sha256; the same release as the live fabric-ca image)
+        run: |
+          curl -fsSL -o /tmp/ca.tgz https://github.com/hyperledger/fabric-ca/releases/download/v1.5.22/hyperledger-fabric-ca-linux-amd64-1.5.22.tar.gz
+          echo "7f52ab98481ac0e4bfcf5b5aabfb403fa692ee100ae3b2ca3bf3f2152851573d  /tmp/ca.tgz" | sha256sum -c -
+          tar xzf /tmp/ca.tgz -C /tmp bin/fabric-ca-client
+          sudo install /tmp/bin/fabric-ca-client /usr/local/bin/fabric-ca-client
+      - name: multiorg/fsc incl. the REAL fabric-ca tests (missing docker/client fails, no skip)
+        run: python3 -m pip install pyyaml==6.0.1 && REQUIRE_REAL_CA=1 python3 -m unittest discover -s multiorg/fsc
