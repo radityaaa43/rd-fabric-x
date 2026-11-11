@@ -14,7 +14,7 @@ are packed into one Secret per pod (sent to kubectl on stdin, never written to d
 
 usage: k8s.py render --org bi|bank-a|bank-b --ns rd-fabricx-<org>
                                  one party's objects (its pod, Services, Secret, PVC, Deployment at 0 replicas) in its own
-                                 namespace, final design PLAN S2. stdout only; Secret data is redacted, never printed.
+                                 namespace, final design PLAN S2. stdout only; Secret data and env values are "redacted" (review and dry-run, never apply).
                                  Needs IMAGE pinned by digest. Cluster 2 (bank-c) is S18, refused here.
        k8s.py apply [replicas]   Secrets, PVCs, Services, Deployments (replicas default 1)
        k8s.py seed               copy this host's node stores into the PVCs (Deployments at 0, local nodes stopped)
@@ -392,6 +392,22 @@ ORG_POD = {"bi": "rdbi-bi", "bank-a": "rdbi-bank2", "bank-b": "rdbi-bank3"}  # b
 AVOID_NODES = ["member-16033-node", "member-16034-node"]  # kubernetes.io/hostname of nodes other work uses (lead, fabricx S2)
 
 
+def redact(docs):
+    """Secret data/stringData and every container env value become "redacted": a render is for review and dry-run, never for apply."""
+    for d in docs:
+        if d["kind"] == "Secret":
+            for field in ("data", "stringData"):
+                if field in d:
+                    d[field] = {k: base64.b64encode(b"redacted").decode() if field == "data" else "redacted" for k in d[field]}
+        if d["kind"] == "Deployment":
+            spec = d["spec"]["template"]["spec"]
+            for c in spec.get("initContainers", []) + spec.get("containers", []):
+                for e in c.get("env", []):
+                    if "value" in e:
+                        e["value"] = "redacted"
+    return docs
+
+
 def render(org, ns):
     global NS
     if org not in ORG_POD:
@@ -402,9 +418,7 @@ def render(org, ns):
         sys.exit("k8s.py render: IMAGE must be pinned by digest (repo@sha256:<64 hex>)")
     NS = ns
     docs = institution(ORG_POD[org], 0)  # replicas 0: applying the render starts nothing
-    for d in docs:
-        if d["kind"] == "Secret":  # key material never leaves the host through stdout
-            d["data"] = {k: base64.b64encode(b"redacted").decode() for k in d["data"]}
+    for d in redact(docs):
         if d["kind"] == "Deployment":
             spec = d["spec"]["template"]["spec"]
             d["spec"]["template"]["metadata"]["labels"]["party"] = org

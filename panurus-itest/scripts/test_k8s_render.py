@@ -30,6 +30,7 @@ def make_home(h):
                                    "queryService": {"endpoints": [{"address": "127.0.0.1:25140"}]}}},
             "token": {"key": f"{h}/live/{n}/wallet.pem"}}))
         w(f"live/{n}/role", "bank")
+        w(f"live/{n}/policy.env", f"POLICY_TOKEN={MARKER}-ENV\n")
         w(f"live/{n}/wallet.pem", MARKER)
     for b, org in (("bank2", 2), ("bank3", 3), ("bank4", 4)):
         w(f"ids/committer-{b}/tls/signcerts/cert.pem", "CERT")
@@ -104,6 +105,22 @@ class Render(unittest.TestCase):
         for d in docs:
             if d["kind"] == "Secret":
                 self.assertEqual({base64.b64decode(v) for v in d["data"].values()}, {b"redacted"})
+
+    def test_env_values_redacted(self):
+        out, docs = self.docs("bank-a")
+        self.assertNotIn(MARKER + "-ENV", out)
+        envs = [e for p in self.pods(docs) for c in p["containers"] for e in c.get("env", [])]
+        self.assertTrue(any(e["name"] == "POLICY_TOKEN" for e in envs))  # the name stays, only the value goes
+        self.assertTrue(all(e.get("value", "redacted") == "redacted" for e in envs if "valueFrom" not in e))
+
+    def test_redact_covers_stringdata(self):
+        sys.path.insert(0, HERE)
+        os.environ.setdefault("IMAGE", DIGEST)
+        import k8s
+        docs = [{"kind": "Secret", "data": {"a": base64.b64encode(MARKER.encode()).decode()}, "stringData": {"b": MARKER}},
+                {"kind": "Deployment", "spec": {"template": {"spec": {"initContainers": [{"env": [{"name": "X", "value": MARKER}]}],
+                                                                       "containers": [{"env": [{"name": "Y", "value": MARKER}, {"name": "Z", "valueFrom": {"secretKeyRef": {"name": "s", "key": "k"}}}]}]}}}}]
+        self.assertNotIn(MARKER, yaml.safe_dump(k8s.redact(docs)))
 
     def test_bi_has_no_committer(self):
         _, docs = self.docs("bi")
