@@ -1,0 +1,6 @@
+# The patches the build may apply, accepted by the user (README.md deviations; analyst AFTER fabricx rows 3-4). Any other, extra or modified patch fails rdbi-image.yml.
+3c149898aeb66270e4e0339b51f073028e9b82c121d6b2260a7cd5fbf0f3fc82  fsc-full-certificate.patch
+a47fc8e57e5a293ef2f00a121438026079b613e094062898eda24c71a2d86b1a  panurus-auditor-limits.patch
+0b6009307c02f6fb8a13bad3ce1c149bf8fa3d233ccb101b669342623b94ce7b  panurus-endorser-failover.patch
+db40a5728614d0aacfa3a73eb914653fd048d998c84749c8f2a7cda177981226  panurus-issuer-keeps-audit-tokens.patch
+dbe316e1fdd0bf329c9ca4014aea797b4654c5c51d05c083514a114c52093b32  panurus-sequential-remote-signatures.patch

@@ -23,6 +23,12 @@ jobs:
         run: |
           git clone -q --depth 1 --branch v0.24.0 https://github.com/LFDT-Panurus/panurus.git panurus
           test "$(git -C panurus rev-parse HEAD)" = 5f3c49e2d9e4507138ef330d34d60ec560fd1525
+      - name: Check the patch set (exactly the accepted patches, byte for byte)
+        working-directory: panurus-itest/patches
+        run: |
+          test "$(ls *.patch | sort | tr '\n' ' ')" = "$(grep -v '^#' ACCEPTED.sha256 | awk '{print $2}' | sort | tr '\n' ' ')"
+          grep -v '^#' ACCEPTED.sha256 | sha256sum -c -
+          { echo "patches applied to Panurus v0.24.0 (5f3c49e2):"; sha256sum *.patch; } | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: panurus/integration/go.mod
@@ -47,6 +53,18 @@ jobs:
           CGO_ENABLED=0 go build -trimpath -o "$GITHUB_WORKSPACE/bin/rdbi-driver" ./token/fungible/rdbi/cmd/driver
           for b in rdbi-node rdbi-driver; do ldd "$GITHUB_WORKSPACE/bin/$b" 2>&1 | grep -q "not a dynamic executable"; done
       - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+      - name: Build the image locally for the key scan (not pushed)
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: bin
+          file: panurus-itest/k8s/Dockerfile
+          load: true
+          push: false
+          tags: rdbi-node:scan
+      - name: Scan the image layers for private keys
+        run: |
+          docker save rdbi-node:scan -o "$RUNNER_TEMP/image.tar"
+          python3 panurus-itest/scripts/scan_image_keys.py "$RUNNER_TEMP/image.tar" | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io

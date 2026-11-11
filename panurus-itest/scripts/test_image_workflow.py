@@ -35,7 +35,7 @@ class ImageWorkflow(unittest.TestCase):
         self.assertIn("5f3c49e2d9e4507138ef330d34d60ec560fd1525", text)   # the same pin as rdbi.yml
 
     def test_sbom_and_max_provenance_on_the_pushed_image(self):
-        bp = [s for s in steps(load()) if str(s.get("uses", "")).startswith("docker/build-push-action@")]
+        bp = [s for s in steps(load()) if str(s.get("uses", "")).startswith("docker/build-push-action@") and s.get("with", {}).get("push")]
         self.assertEqual(len(bp), 1)
         w = bp[0]["with"]
         self.assertTrue(w["push"])
@@ -60,8 +60,32 @@ class ImageWorkflow(unittest.TestCase):
     def test_tests_run_before_the_image_is_built(self):
         names = [s.get("name", s.get("uses", "")) for s in steps(load())]
         t = next(i for i, n in enumerate(names) if "go vet and go test" in n)
-        b = next(i for i, n in enumerate(names) if n.startswith("docker/build-push-action"))
+        b = next(i for i, n in enumerate(names) if n.startswith("docker/build-push-action") or "docker/build-push-action" in n)
         self.assertLess(t, b)
+
+    def test_patch_set_is_checked_before_anything_is_patched(self):
+        names = [s.get("name", s.get("uses", "")) for s in steps(load())]
+        c = next(i for i, n in enumerate(names) if n.startswith("Check the patch set"))
+        a = next(i for i, n in enumerate(names) if n.startswith("Patch Panurus"))
+        self.assertLess(c, a)
+        run = [s for s in steps(load()) if s.get("name", "").startswith("Check the patch set")][0]["run"]
+        self.assertIn("sha256sum -c", run)
+        self.assertIn("ACCEPTED.sha256", run)
+        self.assertIn("GITHUB_STEP_SUMMARY", run)   # the list and the hashes are quoted in the run summary
+
+    def test_image_is_scanned_for_private_keys_before_it_is_pushed(self):
+        st = steps(load())
+        names = [s.get("name", s.get("uses", "")) for s in st]
+        bps = [i for i, s in enumerate(st) if str(s.get("uses", "")).startswith("docker/build-push-action@")]
+        self.assertEqual(len(bps), 2)
+        local, push = bps
+        self.assertTrue(st[local]["with"]["load"])
+        self.assertFalse(st[local]["with"]["push"])
+        self.assertTrue(st[push]["with"]["push"])
+        sc = next(i for i, n in enumerate(names) if n.startswith("Scan the image layers"))
+        self.assertLess(local, sc)
+        self.assertLess(sc, push)
+        self.assertIn("scan_image_keys.py", st[sc]["run"])
 
     def test_digest_is_reported(self):
         self.assertIn("GITHUB_STEP_SUMMARY", open(WF).read())
