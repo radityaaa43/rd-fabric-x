@@ -522,5 +522,15 @@ class NetworkPolicyTests(Base):
             else:
                 self.assertEqual(rule["from"], [ns, {"ipBlock": {"cidr": "47.237.84.150/32"}}])  # the cluster-2 egress
 
+    def test_clb_health_cidr_is_opt_in_and_exactly_100_64(self):
+        for p in PARTIES:
+            default = self.np(p)["spec"]["ingress"][0]["from"]
+            self.assertNotIn({"ipBlock": {"cidr": "100.64.0.0/10"}}, default)                    # S10b rule: only AFTER the ACL read-back
+            x = next(d for d in self.docs(p, clb_health_cidr="100.64.0.0/10") if d["kind"] == "NetworkPolicy")
+            self.assertEqual(x["spec"]["ingress"][0]["from"], default + [{"ipBlock": {"cidr": "100.64.0.0/10"}}])   # one more element, nothing else changes
+        for bad in ("0.0.0.0/0", "100.64.0.0/16", "10.0.0.0/8", ""):
+            with self.assertRaises(SystemExit):
+                render.render("bi", **self.kw("bi", clb_health_cidr=bad))
+
     def test_ports_follow_the_port_plan(self):
         self.assertEqual([q["port"] for q in self.np("bi")["spec"]["ingress"][0]["ports"]], sorted(enroll.PORT_PLAN.values()))
