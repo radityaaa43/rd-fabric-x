@@ -235,6 +235,13 @@ class GwRender(unittest.TestCase):
         with self.assertRaises(SystemExit):
             build(self.root, "bi")
 
+    def test_pull_secret_for_the_private_images(self):
+        # live S16 bank-a: fxapi ImagePullBackOff `failed to fetch anonymous token ... 401`: the rdbi-node-ci package is private and the Deployment had no imagePullSecrets
+        # (bank-b/bi only worked because the node had the image cached). The existing Secret ghcr-pull is in every org namespace (also used by the FSC pod).
+        for p, n in PARTIES.items():
+            spec = by(build(self.root, p), "Deployment", f"fx-gw-{n}")["spec"]["template"]["spec"]
+            self.assertEqual(spec["imagePullSecrets"], [{"name": "ghcr-pull"}], p)
+
     def test_client_config_points_at_the_gw_identity(self):
         docs = build(self.root, "bank-a")
         cm = by(docs, "ConfigMap", "fx-gw-2-client")

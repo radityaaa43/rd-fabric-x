@@ -174,7 +174,8 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
                    {"configMap": {"name": f"{name}-client", "items": live_items}},
                    {"secret": {"name": f"{name}-client", "items": [{"key": "gw.key", "path": f"gw/{node}-gw.key"}]}},
                    {"configMap": {"name": "rdbi-public", "items": [{"key": "ca-bundle.pem", "path": f"live/{node}/tls-ca.crt"}]}}]}}]
-    spec = {"securityContext": {"runAsNonRoot": True, "runAsUser": UID, "fsGroup": UID, "seccompProfile": {"type": "RuntimeDefault"}},
+    spec = {"imagePullSecrets": [{"name": "ghcr-pull"}],   # rdbi-node-ci is a private package (the existing Secret ghcr-pull is in every org namespace)
+            "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "fsGroup": UID, "seccompProfile": {"type": "RuntimeDefault"}},
             "containers": containers, "volumes": volumes}
     if aliases:
         spec["hostAliases"] = aliases
