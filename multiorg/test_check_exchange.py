@@ -31,9 +31,9 @@ def good_tree(root, n=2):
     write(root, "msp/cacerts/ca.pem", CERT)
     write(root, "msp/tlscacerts/tlsca.pem", CERT)
     for r in ROLES:
-        write(root, f"orderers/party{n}/{r}/tls/tls-cert.pem", CERT)
+        write(root, f"orderers/party{n}/{r}/tls/server.crt", CERT)
         if r in ("batcher1", "consenter"):
-            write(root, f"orderers/party{n}/{r}/msp/signcerts/sign-cert.pem", CERT)
+            write(root, f"orderers/party{n}/{r}/msp/signcerts/{r}-cert.pem", CERT)
     write(root, "endpoints.yaml", yaml.safe_dump({r: {"Host": f"{r}-{n}.rd-fabricx-bank-a.svc", "Port": 7000 + i} for i, r in enumerate(ROLES)}))
     manifest(root)
 

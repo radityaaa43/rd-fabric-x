@@ -47,8 +47,10 @@ def check(docs, party, cluster=None):
         assert "pods/exec" not in rule["resources"], rule
         if "secrets" in rule["resources"]:
             assert rule["resources"] == ["secrets"] and set(rule["verbs"]) == {"create", "update", "patch"}, rule
+    pf = [r for r in by["Role"][SA]["rules"] if "pods/portforward" in r["resources"]]
+    assert len(pf) == 1 and pf[0]["verbs"] == ["create"], "pods/portforward create only (S9: reach the own CA)"
     granted = {r for rule in by["Role"][SA]["rules"] for r in rule["resources"]}
-    need = {"deployments", "statefulsets", "services", "configmaps", "persistentvolumeclaims",
+    need = {"pods/portforward", "deployments", "statefulsets", "services", "configmaps", "persistentvolumeclaims",
             "networkpolicies", "pods", "pods/log", "secrets"}
     assert need <= granted, f"Role misses {need - granted}"
 
