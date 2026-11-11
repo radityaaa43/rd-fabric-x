@@ -16,7 +16,7 @@ python3 multiorg/arma/render.py <party> --exchange <dir with org1..org4> --genes
 - `--exchange`: the four public trees from `enroll.py`; each is checked with `check_exchange.problems` (any private key, missing file or bad manifest = refuse) and its `endpoints.yaml` must carry the name plan below (Host `<role>-<N>.arma.rd`, ports from `PORT_PLAN`).
 - `--genesis` + `--genesis-sha256`: refused unless the sha256 (64 lowercase hex) matches and the file is at most 700 KiB (the ConfigMap limit is 1 MiB for the whole object and `binaryData` is base64, x 4/3). It goes into `genesis-block` as `binaryData`.
 - `--image`: default is the 1.0.4 digest running today; anything that is not `repo@sha256:<64 hex>` is refused.
-- `--replicas`: default 1, 0 is refused. `--zone`/`--storage-class`: cluster 1 defaults `ap-southeast-5b` / `alicloud-essd-wffc`; bank-c REQUIRES both (lead: `ap-southeast-1a`, `fabricx-essd`).
+- `--replicas`: default 1, 0 is refused. `--zone`/`--storage-class`: cluster 1 defaults `ap-southeast-5b` / `alicloud-essd-wffc`; bank-c REQUIRES `--storage-class` (`fabricx-essd`, WaitForFirstConsumer, Retain, read before every apply) and has NO zone pin unless `--zone` is given: zone `ap-southeast-1a` had no pod/volume room on 2026-11-11 (0/8 nodes available: 2 too many pods, 2 max volume count, 4 selector).
 - Every refusal prints nothing on stdout. Pipe to `kubectl --kubeconfig <party kubeconfig> apply -f -` only inside a GO window.
 
 ## Names and hostAliases (decision A: one config block, stable names, per-pod resolution)
@@ -50,6 +50,9 @@ TLS roots: outbound connections verify with the per-party `TLSCACerts` of the ge
 - Each role runs the arma CLI command `router`, `batcher`, `consensus` (NOT `consenter`) or `assembler` (`orderer@dd296e3 node/server/arma.go:30-58`); the object names keep the role name.
 - The node local MSP needs an admin: the org's PUBLIC admin cert (exchange `msp/admincerts`) is in `arma-public-<N>` key `msp-admincert.pem` and mounted at `/config/msp/admincerts/admin.pem` (`fabric-x-common msp/mspimplsetup.go:211` panics otherwise). The render refuses an exchange tree without admincerts.
 - `smoke.py` runs the pinned upstream `arma` (orderer@dd296e3, `./cmd/arma`) offline on the rendered args and mount layout of all four parties (throwaway keys, a real genesis from our own tools) and fails if any role exits or panics. Run it before every apply of a changed render: `python3 -I multiorg/arma/smoke.py --arma BIN --armageddon BIN --sample-config DIR --cfgupdate BIN` (BIN as in its docstring). With the old render it fails on exactly the two panics seen live (`administrators must be declared ...`, `expected command but got "consenter"`).
+
+## Rollout (learnt on the cluster 2026-11-11)
+A StatefulSet RollingUpdate never replaces a pod that has not become Ready. After a spec fix the update revision differs from the current one and a crash-looping pod keeps the OLD spec: update the spec, then delete the stuck pods (PVCs stay). Check `kubectl get sts -o custom-columns=N:.metadata.name,CUR:.status.currentRevision,UPD:.status.updateRevision` before judging a fix. A spec change on a Pending pod (bank-c, unschedulable) also needs the pod deleted when the pod object was already created with the old spec.
 
 ## Unverified
 - Resource sizes (requests 50m / 128Mi / 64Mi, limits 1 / 512Mi / 512Mi) are first guesses.

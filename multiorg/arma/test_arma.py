@@ -61,7 +61,7 @@ class Base(unittest.TestCase):
     def kw(self, party, **over):
         kw = dict(exchange=self.ex, genesis=self.gen, genesis_sha256=GEN_SHA)
         if party == "bank-c":
-            kw.update(zone="ap-southeast-1a", storage_class="fabricx-essd")
+            kw.update(storage_class="fabricx-essd")   # cluster 2: no zone pin (WaitForFirstConsumer class, lead 2026-11-11)
         kw.update(over)
         return kw
 
@@ -77,7 +77,7 @@ class Base(unittest.TestCase):
     def cli_args(self, party, **over):
         a = [party, "--exchange", self.ex, "--genesis", self.gen, "--genesis-sha256", GEN_SHA]
         if party == "bank-c":
-            a += ["--zone", "ap-southeast-1a", "--storage-class", "fabricx-essd"]
+            a += ["--storage-class", "fabricx-essd"]
         for k, v in over.items():
             a += [f"--{k.replace('_', '-')}", v]
         return a
@@ -411,19 +411,18 @@ class Placement(Base):
         src = open(os.path.join(os.path.dirname(os.path.dirname(HERE)), "panurus-itest", "scripts", "k8s.py")).read()
         self.assertIn('AVOID_NODES = ["member-16033-node", "member-16034-node"]', src)
 
-    def test_bank_c_needs_zone_and_storage_class(self):
+    def test_bank_c_needs_storage_class_and_has_no_zone_pin_by_default(self):
         s = self.spec("bank-c")
-        self.assertEqual(s["template"]["spec"]["nodeSelector"], {"topology.kubernetes.io/zone": "ap-southeast-1a"})
+        self.assertNotIn("nodeSelector", s["template"]["spec"])                       # zone 1a had no pod/volume room; the class binds on first consumer
+        pinned = self.spec("bank-c", zone="ap-southeast-1b")                           # an explicit zone still pins
+        self.assertEqual(pinned["template"]["spec"]["nodeSelector"], {"topology.kubernetes.io/zone": "ap-southeast-1b"})
         self.assertEqual(s["volumeClaimTemplates"][0]["spec"]["storageClassName"], "fabricx-essd")
         self.assertNotIn("nodeAffinity", s["template"]["spec"]["affinity"])           # cluster 2: other node names
         with self.assertRaises(SystemExit):
-            render.render("bank-c", exchange=self.ex, genesis=self.gen, genesis_sha256=GEN_SHA, storage_class="fabricx-essd")
-        with self.assertRaises(SystemExit):
-            render.render("bank-c", exchange=self.ex, genesis=self.gen, genesis_sha256=GEN_SHA, zone="ap-southeast-1a")
-        for args in (["--zone", "ap-southeast-1a"], ["--storage-class", "fabricx-essd"]):
-            r = self.cli("bank-c", "--exchange", self.ex, "--genesis", self.gen, "--genesis-sha256", GEN_SHA, *args)
-            self.assertNotEqual(r.returncode, 0)
-            self.assertEqual(r.stdout, "")
+            render.render("bank-c", exchange=self.ex, genesis=self.gen, genesis_sha256=GEN_SHA, zone="ap-southeast-1a")   # class is never guessed
+        r = self.cli("bank-c", "--exchange", self.ex, "--genesis", self.gen, "--genesis-sha256", GEN_SHA, "--zone", "ap-southeast-1a")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertEqual(r.stdout, "")
 
     def test_zone_and_storage_class_names_validated(self):
         for bad in ("", "a b", "x:y"):
