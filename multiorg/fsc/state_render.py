@@ -8,6 +8,8 @@ The FSC pod keeps one sqlite per node on its state PVC `rdbi-<pod>-state`: `<PVC
                  .restore-test-<GEN>, counts must equal the first counts) -> remove the original three files. Any failure stops before the removal. PVC read-write.
   restore        rollback: copy the *.bak-<GEN> files back over default.sqlite* and verify sha256.
   remove-backup  the separate later step: remove ONLY the *.bak-<GEN> files.
+                 The FSC pod keeps running: the state PVC is ReadWriteOnce and attached to its node, so this Job (only this mode) carries a required podAffinity to the FSC pod (same node);
+                 without it the scheduler may pick another node and the Job dies with Multi-Attach (live 2026-11-12, bi).
 Pod: label rd/egress-locked=true, NetworkPolicy with policyTypes Ingress+Egress and NO rules (all traffic denied), no Secret volume, no ServiceAccount token, uid 10001, deadline 120 s, ttl 900 s.
 Scripts read $S (state, default /state) and $W (scratch, default /work) so they can be run on fixture directories in tests."""
 import argparse, re, sys
@@ -111,6 +113,8 @@ def render(mode, party, image, gen):
                         "serviceAccountName": "s14-signer", "automountServiceAccountToken": False, "restartPolicy": "Never",
                         "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "fsGroup": UID, "seccompProfile": {"type": "RuntimeDefault"}},
                         "imagePullSecrets": [{"name": "ghcr-pull"}],
+                        **({"affinity": {"podAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
+                            {"labelSelector": {"matchLabels": {"app.kubernetes.io/name": f"rdbi-{pod}"}}, "topologyKey": "kubernetes.io/hostname"}]}}} if mode == "remove-backup" else {}),
                         "containers": [{"name": "state", "image": image, "command": ["sh", "-c", script(mode, nodes, gen)], "securityContext": sec,
                                         "volumeMounts": [{"name": "state", "mountPath": "/state", **({"readOnly": True} if ro else {})}, {"name": "work", "mountPath": "/work"}],
                                         "resources": {"requests": {"cpu": "20m", "memory": "32Mi", "ephemeral-storage": "8Mi"}, "limits": {"cpu": "500m", "memory": "256Mi", "ephemeral-storage": "64Mi"}}}],
