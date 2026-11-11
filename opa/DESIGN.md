@@ -15,7 +15,8 @@ Status: design only. No live writes made.
   (each rdbi-bankN pod also holds endorser-N, its committer parts and Postgres).
 - Ports (grpc, p2p, web): issuer 5100-5102, bank2 5103-5105, bank3 5106-5108, bank4 5109-5111,
   endorser-1..4 5112-5123. All ClusterIP. web is disabled.
-- **ns `fabricx` has NO NetworkPolicy today.** Only `fabricx-bi`, `fabricx-bank-a` and `fabricx-bank-b`
+- **ns `fabricx` has four ingress NetworkPolicies** (`rdbi-bi-ingress`, `rdbi-bank2/3/4-ingress`, section 8; no default-deny;
+  committer, orderer, CA, explorer and fx-gw pods are selected by none). `fabricx-bi`, `fabricx-bank-a` and `fabricx-bank-b`
   have `default-deny-all`; `fabricx-bank-c` has none. Those namespaces hold the separate
   fabricx-transfer-v2 stack, which Lensa does not use.
 - Node memory is tight (member nodes at 91-99%). Paladin gateway sizing: envoy 20m/32Mi (lim 128Mi), opa 20m/64Mi (lim 256Mi).
