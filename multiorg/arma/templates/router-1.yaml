@@ -1,0 +1,159 @@
+#
+# Copyright IBM Corp. All Rights Reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+
+# ---------------------------------------------------------------------------
+# PartyID is the party id to which the node belongs
+# ---------------------------------------------------------------------------
+PartyID: 1
+
+# ---------------------------------------------------------------------------
+# General settings
+# These settings configure the gRPC server, TLS, bootstrap, cluster,
+# local MSP, crypto provider, and logging for the orderer node.
+# ---------------------------------------------------------------------------
+General:
+  # Listen address: The IP on which to bind to listen.
+  ListenAddress: 0.0.0.0
+  # Listen port: The port on which to bind to listen.
+  ListenPort: 7050
+  # TLS: TLS settings for the GRPC server.
+  TLS:
+    # Require server-side TLS.
+    # Even when TLS is disabled, PrivateKey and Certificate point to valid
+    # credentials because nodes operate with mTLS internally.
+    Enabled: true
+    # PrivateKey governs the file location of the private key of the TLS certificate.
+    PrivateKey: /config/tls/server.key
+    # Certificate governs the file location of the server TLS certificate.
+    Certificate: /config/tls/server.crt
+    # RootCAs contains additional root certificates for verifying certificates
+    # of other orderer nodes during outbound connections.
+    RootCAs:
+      - /config/tls/ca.crt
+    # Require client certificates / mutual TLS for inbound connections.
+    ClientAuthRequired: true
+  # Keepalive settings for the GRPC server.
+  Keepalive:
+    # ClientInterval is the time between pings to orderer nodes.
+    ClientInterval: 1m0s
+    # ClientTimeout is the duration the client waits for a response before
+    # closing the connection.
+    ClientTimeout: 20s
+    # ServerMinInterval is the minimum permitted time between client pings.
+    # If clients send pings more frequently, the server will disconnect them.
+    ServerMinInterval: 1m0s
+    # ServerInterval is the time between pings to clients.
+    ServerInterval: 2h0m0s
+    # ServerTimeout is the duration the server waits for a response from a
+    # client before closing the connection.
+    ServerTimeout: 20s
+  # Config defines the configuration options for backoff GRPC client.
+  Backoff:
+    # BaseDelay is the amount of time to backoff after the first failure.
+    BaseDelay: 1s
+    # Multiplier is the factor with which to multiply backoffs after a failed
+    # retry. Should ideally be greater than 1.
+    Multiplier: 1.6
+    # MaxDelay is the upper bound of backoff delay.
+    MaxDelay: 2m0s
+  # Max message size in bytes the GRPC server and client can receive.
+  MaxRecvMsgSize: 104857600
+  # Max message size in bytes the GRPC server and client can send.
+  MaxSendMsgSize: 104857600
+  # Bootstrap: how to obtain the bootstrap configuration.
+  Bootstrap:
+    # Method: The method by which to obtain the bootstrap configuration.
+    # The option can be one of:
+    #   "block" - path to a file containing the genesis block or config block
+    #   "yaml" - path to a file containing a YAML bootstrap configuration.
+    Method: block
+    # File: The file containing the bootstrap configuration.
+    # The bootstrap file can be the genesis block, and it can also be a config
+    # block for late bootstrap.
+    File: /config/genesis.block
+  # Cluster settings for ordering service nodes that communicate with other ordering service nodes.
+  Cluster:
+    # SendBufferSize is the maximum number of messages in the egress buffer.
+    # Consensus messages are dropped if the buffer is full, and transaction
+    # messages are waiting for space to be freed.
+    SendBufferSize: 100
+    # ClientCertificate governs the file location of the client TLS certificate
+    # used to establish mutual TLS connections with other ordering service nodes.
+    # If not set, the server General.TLS.Certificate is re-used.
+    ClientCertificate: /config/tls/server.crt
+    # ClientPrivateKey governs the file location of the private key of the client TLS certificate.
+    # If not set, the server General.TLS.PrivateKey is re-used.
+    ClientPrivateKey: /config/tls/server.key
+  # LocalMSPDir is where to find the private crypto material needed by the orderer.
+  LocalMSPDir: /config/msp
+  # LocalMSPID is the identity to register the local MSP material with the MSP manager.
+  LocalMSPID: OrdererOrg1
+  # BCCSP configures the blockchain crypto service providers.
+  BCCSP:
+    # Default specifies the preferred blockchain crypto service provider to use.
+    Default: SW
+    # SW configures the software based blockchain crypto provider.
+    SW:
+      Hash: SHA2
+      Security: 256
+  # LogSpec controls the logging level of the server.
+  LogSpec: info
+  # ClientSignatureVerificationRequired specifies if router and batcher validate
+  # the signature in client requests.
+  ClientSignatureVerificationRequired: false
+
+# ---------------------------------------------------------------------------
+# FileStore settings
+# It defines the configuration of the file store
+# where blocks and databases are stored.
+# ---------------------------------------------------------------------------
+FileStore:
+  # The directory to store data in, e.g. the blocks and databases.
+  Location: /data/v2/store
+
+# ---------------------------------------------------------------------------
+# Operations Configuration
+# This configures the operations server endpoint for metrics and operations APIs.
+# ---------------------------------------------------------------------------
+Operations:
+  # Host for the operations server.
+  ListenAddress: 0.0.0.0
+  # Port for the operations server.
+  ListenPort: 7060
+  # TLS configuration for the operations endpoint.
+  TLS:
+    # TLS enabled.
+    Enabled: true
+    # Certificate is the location of the PEM encoded TLS certificate.
+    Certificate: /config/tls/server.crt
+    # PrivateKey points to the location of the PEM-encoded key.
+    PrivateKey: /config/tls/server.key
+    # ClientAuthRequired requires client certificate authentication at the TLS layer.
+    ClientAuthRequired: true
+    # Paths to PEM encoded CA certificates to trust for client authentication.
+    ClientRootCAs:
+      - /config/tls/ca.crt
+      - /config/mtls/prometheus/ca.crt
+
+
+# ---------------------------------------------------------------------------
+# Metrics Configuration
+# This configures metrics collection for the orderer.
+# ---------------------------------------------------------------------------
+Metrics:
+  # The metrics provider is one of prometheus or disabled.
+  Provider: prometheus
+  # MetricsLogInterval defines metrics log period; 0 disables.
+  MetricsLogInterval: 0s
+
+# ---------------------------------------------------------------------------
+# Hyperledger Fabric-X Router settings
+# ---------------------------------------------------------------------------
+Router:
+  # The number of connections between Router and Batcher
+  NumberOfConnectionsPerBatcher: 10
+  # The number of streams per connection that are opened between Router and Batcher.
+  NumberOfStreamsPerConnection: 5
