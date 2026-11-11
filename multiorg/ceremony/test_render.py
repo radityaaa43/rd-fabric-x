@@ -217,6 +217,15 @@ class Locked(Base):
                 with self.assertRaises(SystemExit):
                     self.probe(allow=[bad])
 
+    def test_probe_nspod_allow_form_selects_namespace_and_pod_together(self):
+        np = self.by(self.probe(allow=["nspod=rd-fabricx-bank-b/rdbi-bank3:5107"]), "NetworkPolicy")["spec"]
+        self.assertEqual(np["egress"], [{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "rd-fabricx-bank-b"}}, "podSelector": {"matchLabels": {"app.kubernetes.io/name": "rdbi-bank3"}}}],
+                                          "ports": [{"port": 5107, "protocol": "TCP"}]}])
+        for bad in ("nspod=kube-system/x:1", "nspod=default/x:1", "nspod=rd-fabricx-bank-b/x:0", "nspod=rd-fabricx-bank-b/x", "nspod=rd-fabricx-a b/x:1"):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    self.probe(allow=[bad])
+
     def test_probe_without_allow_has_no_egress_rules(self):
         np = self.by(self.probe(), "NetworkPolicy")
         self.assertNotIn("egress", np["spec"])
