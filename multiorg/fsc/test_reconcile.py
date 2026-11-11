@@ -14,6 +14,7 @@ LEDGER = "".join(f"\\000tr\\000{t}\\000\n" for t in TX) + "\\000other\\000x\n"
 
 STUB = """#!/bin/sh
 echo "$@" >> "$STUB_LOG"
+echo "$KUBECTL_REMOTE_COMMAND_WEBSOCKETS" >> "$STUB_LOG.ws"
 case "$*" in
   *psql*) cat "$STUB_LEDGER";;
   *"-wal"*) cat "$STUB_SQLITE-wal" 2>/dev/null || true;;
@@ -65,7 +66,7 @@ class Flow(unittest.TestCase):
         self.tmp.cleanup()
 
     def run_it(self, *extra):
-        return subprocess.run([sys.executable, "-I", os.path.join(HERE, "reconcile.py"), "--kubeconfig", "/k", "--ns", "rd-fabricx-bi", *extra], capture_output=True, text=True, env=self.env)
+        return subprocess.run([sys.executable, "-I", os.path.join(HERE, "reconcile.py"), "--kubeconfig", "/k", "--ns", "rd-fabricx-bi", "--fsc-pod", "rdbi-bi-6f58bd75d4-pmd9s", *extra], capture_output=True, text=True, env=self.env)
 
     def test_all_confirmed_exit_0(self):
         make_store(f"{self.tmp.name}/issuer.sqlite", [(t, 2) for t in TX])
@@ -93,6 +94,28 @@ class Flow(unittest.TestCase):
         self.assertIn("select encode(key, 'escape') from ns_rd_dfabi_v2", sql[0])
         self.assertNotRegex(sql[0].lower(), r"insert|update|delete|drop|alter")
         self.assertNotIn("-n fabricx ", "\n".join(log))                                  # the old namespace is never named
+
+    def test_targets_are_exactly_the_two_named_pods_no_deploy_no_list(self):
+        make_store(f"{self.tmp.name}/issuer.sqlite", [(t, 2) for t in TX])
+        self.run_it()
+        log = open(f"{self.tmp.name}/log").read().splitlines()
+        targets = {l.split(" exec ")[1].split()[0] for l in log}
+        self.assertEqual(targets, {"committer-db-0", "rdbi-bi-6f58bd75d4-pmd9s"})   # the Role names exactly these two (Q18)
+        for l in log:
+            self.assertNotIn("deploy/", l)
+            self.assertNotRegex(l, r"\b(get|list|watch)\b")
+
+    def test_spdy_is_forced_so_create_on_pods_exec_is_enough(self):
+        make_store(f"{self.tmp.name}/issuer.sqlite", [(t, 2) for t in TX])
+        self.run_it()
+        self.assertEqual(set(open(f"{self.tmp.name}/log.ws").read().split()), {"false"})
+
+    def test_fsc_pod_name_is_required_and_checked(self):
+        r = subprocess.run([sys.executable, "-I", os.path.join(HERE, "reconcile.py"), "--kubeconfig", "/k"], capture_output=True, text=True, env=self.env)
+        self.assertNotEqual(r.returncode, 0)
+        r = self.run_it("--fsc-pod", "rdbi-bi; rm -rf /")
+        self.assertNotEqual(r.returncode, 0)
+        self.assertFalse(os.path.exists(f"{self.tmp.name}/log"))
 
     def test_password_stays_in_the_pod(self):
         make_store(f"{self.tmp.name}/issuer.sqlite", [(t, 2) for t in TX])

@@ -11,6 +11,9 @@ Status: PRE-STAGE, repo only. AFTER deviation S17 accepted by user word "A" 2026
 python3 multiorg/fsc/reconcile.py --kubeconfig <bi kubeconfig> [--ns rd-fabricx-bi] [--token-ns rd_dfabi_v2]
 ```
 
+## Credential: the Role (analyst Q18 = A)
+`reconcile_role.py --fsc-pod rdbi-bi-<hash>-<id>` prints Role `reconcile` + RoleBinding in `rd-fabricx-bi`: verbs exactly `get` on `pods` and `create` on `pods/exec`, on exactly two names (`committer-db-0` and the current FSC pod), no list/watch/wildcard, subject = the `party-admin` ServiceAccount of `rd-fabricx-bi` only. `reconcile.py --fsc-pod <name>` addresses the pods by name and forces SPDY (`KUBECTL_REMOTE_COMMAND_WEBSOCKETS=false`: kubectl >= 1.31 would otherwise need `get` on `pods/exec`). The FSC pod name changes at every rollout, so the Role is re-rendered and re-applied as a step of EVERY FSC rollout text; a failed reconcile after a rollout is reported as "Role stale" and never retried under cluster-admin. UNVERIFIED until the first apply: that SPDY exec with `create` only is accepted (the render was only server-dry-run validated).
+
 ## Proof (a user-word window, NOT part of this PR)
 1. BI down (user-only window), send a real transfer between two banks; the bank's report answers "not delivered".
 2. Restart the bank's fxapi container while BI is still down (the due set is in memory; the startup pass must recover it).
