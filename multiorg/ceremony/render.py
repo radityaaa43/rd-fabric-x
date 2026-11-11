@@ -3,8 +3,8 @@
 
 usage: render.py role <party>
        render.py job <party> --tx FILE --cacert FILE --image repo@sha256:HEX --tx-name NAME
-       render.py submit bi --tx FILE --cacert FILE --image repo@sha256:HEX --tx-name NAME      (tx1 submit --wait, BI only)
-       render.py readback bi --cacert FILE --image repo@sha256:HEX --tx-name NAME              (`namespace list`, BI only)
+       render.py submit bi --tx FILE --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME      (tx1 submit --wait, BI only)
+       render.py readback bi --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME              (`namespace list`, BI only)
        render.py probe <party> --image repo@sha256:HEX --name NAME --try LABEL=HOST:PORT ... [--allow pod=APP:PORT | --allow dns ...]
 `role`: Role s14-sign + RoleBinding in rd-fabricx-<party>: jobs create+get, pods get, pods/log get, bound to the org's own party-admin ServiceAccount only. TIME-BOXED: created right before the
 org's signing and removed right after its Job completed (both logged in R13). party-admin cannot create a Role, so the operator creates it (R13).
@@ -144,7 +144,7 @@ NET_TLS_SECRET = "committer-tls"
 NET_EGRESS = {"submit": ["pod=orderer-router-1:8013", "pod=committer-sidecar:5130", "dns"], "readback": ["pod=committer-query:5140", "dns"]}
 
 
-def render_net(kind, party, image, tx_name, cacert, tx=None):
+def render_net(kind, party, image, tx_name, cacert, mspca, tx=None):
     if kind not in NET_EGRESS:
         die(f"kind {kind!r} must be one of {', '.join(NET_EGRESS)}")
     if party != "bi":
@@ -161,8 +161,10 @@ def render_net(kind, party, image, tx_name, cacert, tx=None):
            "orderer": {"address": "lb-1:8013", "channel": "arma", "connectionTimeout": "15s", "tls": {"serverNameOverride": "router-1.arma.rd"}},
            "queries": {"address": "committer-query-service:5140", "connectionTimeout": "15s"},
            "notifications": {"address": "committer-sidecar:5130", "connectionTimeout": "15s", "waitingTimeout": "60s"}}
-    data = {"config.yaml": yaml.safe_dump(cfg, sort_keys=False), "tlsca.pem": public_file(cacert, "--cacert")}
-    items = [{"key": "config.yaml", "path": "config.yaml"}, {"key": "tlsca.pem", "path": "tlsca.pem"}]
+    if not mspca:
+        die("--mspca is required (the org MSP CA certificate, public: fxconfig loads the MSP from /w/msp and needs msp/cacerts/)")
+    data = {"config.yaml": yaml.safe_dump(cfg, sort_keys=False), "tlsca.pem": public_file(cacert, "--cacert"), "mspca.pem": public_file(mspca, "--mspca")}
+    items = [{"key": "config.yaml", "path": "config.yaml"}, {"key": "tlsca.pem", "path": "tlsca.pem"}, {"key": "mspca.pem", "path": "msp/cacerts/ca.pem"}]
     sources = []
     if kind == "submit":
         if not tx:
@@ -201,6 +203,7 @@ def main():
     ap.add_argument("party")
     for o in ("tx", "cacert", "image", "tx-name", "name"):
         ap.add_argument(f"--{o}")
+    ap.add_argument("--mspca")
     ap.add_argument("--try", dest="tries", action="append", default=[])
     ap.add_argument("--allow", action="append", default=[])
     a = ap.parse_args()
@@ -210,7 +213,7 @@ def main():
         for o in ("image", "tx_name", "cacert") + (("tx",) if a.what == "submit" else ()):
             if not getattr(a, o):
                 die(f"--{o.replace('_', '-')} is required")
-        sys.stdout.write(render_net(a.what, a.party, a.image, a.tx_name, a.cacert, a.tx))
+        sys.stdout.write(render_net(a.what, a.party, a.image, a.tx_name, a.cacert, a.mspca, a.tx))
     elif a.what == "probe":
         sys.stdout.write(render_probe(a.party, a.image, a.name, a.tries, a.allow))
     else:
