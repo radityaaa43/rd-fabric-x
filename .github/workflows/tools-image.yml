@@ -1,0 +1,79 @@
+name: tools-image
+# fxconfig (hyperledger/fabric-x tools v1.0.1, pinned by tag AND commit, built from source, static) in a private image for the S14 in-namespace signing Jobs. One image, one binary.
+# Same gates as rdbi-image.yml: base image pinned by digest, key scan of every layer with a path+sha256 allow-list bound to that base, SBOM, BuildKit SLSA provenance (mode=max).
+# GAP (recorded): no signed attestation; GitHub offers it only for public or organization-owned private repositories, this one is user-owned and private (rdbi-image run 43083952563).
+# The package is fabricx-tools-ci (created and linked to this repo by GITHUB_TOKEN, private). Manual only: run it from the Actions tab (or `gh workflow run tools-image.yml`).
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+defaults:
+  run:
+    shell: bash
+jobs:
+  image:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Clone fabric-x v1.0.1 and check the commit pin
+        run: |
+          git clone -q --depth 1 --branch v1.0.1 https://github.com/hyperledger/fabric-x.git fabric-x
+          test "$(git -C fabric-x rev-parse HEAD)" = a00b9ef83fbb308304a11b4f48eac26072ab9d75
+          echo "fabric-x v1.0.1 commit $(git -C fabric-x rev-parse HEAD)" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: fabric-x/go.mod
+          cache: true
+          cache-dependency-path: fabric-x/go.sum
+      - name: Build fxconfig as a static binary (the runner glibc is newer than the image one)
+        working-directory: fabric-x
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/bin"
+          CGO_ENABLED=0 go build -trimpath -o "$GITHUB_WORKSPACE/bin/fxconfig" ./tools/fxconfig
+          out=$(ldd "$GITHUB_WORKSPACE/bin/fxconfig" 2>&1 || true)
+          grep -q "not a dynamic executable" <<<"$out"
+          sha256sum "$GITHUB_WORKSPACE/bin/fxconfig" | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: docker/setup-buildx-action@b5ca514318bd6ebac0fb2aedd5d36ec1b5c232a2 # v3.10.0
+      - name: Build the image locally for the key scan (not pushed)
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: bin
+          file: multiorg/ceremony/Dockerfile
+          load: true
+          push: false
+          tags: fabricx-tools:scan
+      - name: Scan the image layers for private keys
+        run: |
+          docker save fabricx-tools:scan -o "$RUNNER_TEMP/image.tar"
+          python3 panurus-itest/scripts/scan_image_keys.py "$RUNNER_TEMP/image.tar" --allow panurus-itest/k8s/scan-allow.txt --dockerfile multiorg/ceremony/Dockerfile | tee -a "$GITHUB_STEP_SUMMARY"
+      - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: docker/build-push-action
+        id: build
+        uses: docker/build-push-action@471d1dc4e07e5cdedd4c2171150001c434f0b7a4 # v6.15.0
+        with:
+          context: bin
+          file: multiorg/ceremony/Dockerfile
+          push: true
+          tags: ghcr.io/${{ github.repository_owner }}/fabricx-tools-ci:sha-${{ github.sha }}
+          sbom: true
+          provenance: mode=max
+      # GAP (recorded): no signed attestation for a user-owned private repository (run 43083952563: 'Feature not available for user-owned private repositories').
+      - if: ${{ github.event.repository.private == false }}
+        uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
+        with:
+          subject-name: ghcr.io/${{ github.repository_owner }}/fabricx-tools-ci
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+      - name: Report the digest
+        run: |
+          { echo "image: ghcr.io/${{ github.repository_owner }}/fabricx-tools-ci@${{ steps.build.outputs.digest }}"; echo "SBOM + BuildKit provenance attached; no signed attestation (private user repository)"; } | tee -a "$GITHUB_STEP_SUMMARY"
