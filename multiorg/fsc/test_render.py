@@ -41,6 +41,9 @@ def make_inputs(root):
                 os.makedirs(os.path.dirname(p), exist_ok=True)
                 with open(p, "w") as f:
                     f.write(CERT.replace("MII", f"{n}-{rel.split('/')[0]}"))
+        if m == 1:
+            with open(f"{root}/bootstrap.pem", "w") as f:
+                f.write(CERT.replace("MII", "BOOTSTRAP"))
         p = f"{root}/tlsx/org{m}/msp/tlscacerts/t.pem"
         os.makedirs(os.path.dirname(p), exist_ok=True)
         with open(p, "w") as f:
@@ -56,7 +59,7 @@ class Base(unittest.TestCase):
     def r(self, party, **over):
         central = [k for n in enroll_fsc.NODES[party][1] for k in CENTRAL.get(n, [])]
         kw = dict(templates=f"{self.tmp.name}/live", fsc_exchange=f"{self.tmp.name}/fscx", tls_exchange=f"{self.tmp.name}/tlsx", image=DIGEST, p2p_ips=P2P,
-                  central_keys=central, home=tcr.H)
+                  central_keys=central, home=tcr.H, bootstrap_cert=f"{self.tmp.name}/bootstrap.pem")
         if party == "bank-c":
             kw["storage_class"] = "fabricx-essd"
         kw.update(over)
@@ -127,6 +130,12 @@ class Content(Base):
         for m in (1, 2, 3, 4):
             self.assertIn(f"TLSCA{m}", cm["ca-bundle.pem"])
         self.assertNotIn("PRIVATE KEY", "".join(cm.values()))
+
+    def test_bootstrap_node_public_cert_is_shipped_and_required(self):
+        cm = self.by(self.r("bank-a"), "ConfigMap")["rdbi-public"]["data"]
+        self.assertIn("BOOTSTRAP", cm["fsc__lib-p2p-bootstrap-node.pem"])
+        with self.assertRaises(SystemExit):
+            self.r("bank-a", bootstrap_cert=None)
 
     def test_own_volume_sources_are_exactly_own_secret_endorser_secret_and_arma_public(self):
         for p, n in PARTIES.items():
