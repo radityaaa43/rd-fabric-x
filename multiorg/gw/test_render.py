@@ -187,6 +187,13 @@ class GwRender(unittest.TestCase):
         self.assertEqual(dep["spec"]["strategy"]["type"], "Recreate")
         self.assertEqual(dep["spec"]["replicas"], 1)
 
+    def test_redelivery_tick_is_60s_on_every_gateway(self):
+        # S17: the report redeliverer runs in fxapi; empty = 60 s default, "0" = OFF (redeliver.go redeliverInterval). Pin it explicitly, never empty or 0.
+        for p, n in PARTIES.items():
+            fx = [c for c in by(build(self.root, p), "Deployment", f"fx-gw-{n}")["spec"]["template"]["spec"]["containers"] if c["name"] == "fxapi"][0]
+            vals = [e["value"] for e in fx["env"] if e["name"] == "RDBI_REDELIVER_INTERVAL"]
+            self.assertEqual(vals, ["60s"], p)
+
     def test_client_config_points_at_the_gw_identity(self):
         docs = build(self.root, "bank-a")
         cm = by(docs, "ConfigMap", "fx-gw-2-client")
