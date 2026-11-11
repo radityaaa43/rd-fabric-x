@@ -92,7 +92,7 @@ class Rewrite(unittest.TestCase):
             out, man = self.run_node(n)
             secret = {k: v for k, v in man.items() if v["kind"] == "secret"}
             for pod, info in secret.items():
-                self.assertTrue(pod.startswith(f"{T}/own/"), pod)
+                self.assertTrue(pod.startswith(f"{T}/own/{n}/"), pod)   # issuer and endorser-1 share one pod: private files are per node
                 self.assertNotIn("/".join(["", "ids", ""]) + "bank9", info["src"])
             foreign = [m for m in NODES if m != n]
             for pod, info in man.items():
@@ -119,11 +119,18 @@ class Rewrite(unittest.TestCase):
         w = [v for v in man.values() if "issuers/peerOrganizations" in v["src"]]
         self.assertEqual([v["kind"] for v in w], ["secret"])
         pod = next(k for k, v in man.items() if "issuers/peerOrganizations" in v["src"])
-        self.assertTrue(pod.startswith(f"{T}/own/wallets/"), pod)
+        self.assertTrue(pod.startswith(f"{T}/own/issuer/wallets/"), pod)
         c = core("bank2")
         c["token"]["tms"]["default-arma-rd_dfabi_v2"]["wallets"]["issuers"] = core("issuer")["token"]["tms"]["default-arma-rd_dfabi_v2"]["wallets"]["issuers"]
         with self.assertRaises(ValueError):   # a bank must never carry the issuer wallet
             cr.per_org_core(c, "bank2", H, T)
+
+    def test_view_api_client_cert_is_the_nodes_own_admin_cert_not_the_central_one(self):
+        for n in NODES:
+            out, man = self.run_node(n)
+            self.assertEqual(out["fsc"]["client"]["certs"], [f"{T}/own/{n}/fsc/admin.pem"])
+            self.assertEqual(man[f"{T}/own/{n}/fsc/admin.pem"]["kind"], "public")
+            self.assertNotIn(f"{T}/public/fsc/admin.pem", man)
 
     def test_own_committer_endpoints(self):
         for n in NODES:
