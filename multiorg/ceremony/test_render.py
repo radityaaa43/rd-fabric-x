@@ -312,5 +312,63 @@ class Net(Base):
             self.net("submit", mspca=None)
 
 
+class SetupPP(Base):
+    """(b) qa finding (f): setup-pp as a one-shot Job under BI's own party-admin, not a cluster-admin exec. Mounts only the gateway client identity + public params that the existing Deployment mounts."""
+
+    def pp(self, **kw):
+        a = dict(image=IMG, name="pp1")
+        a.update(kw)
+        return list(yaml.safe_load_all(render.render_setuppp("bi", **a)))
+
+    def test_objects_and_volumes_are_exactly_the_gateway_client_identity(self):
+        docs = self.pp()
+        self.assertEqual(sorted((d["kind"], d["metadata"]["name"]) for d in docs), [("Job", "s14-setuppp-pp1"), ("NetworkPolicy", "s14-setuppp-egress")])
+        spec = self.by(docs, "Job")["spec"]["template"]["spec"]
+        vols = {v["name"]: v for v in spec["volumes"]}
+        self.assertEqual(sorted(vols), ["home", "live"])
+        self.assertEqual(vols["home"], {"name": "home", "emptyDir": {}})
+        src = vols["live"]["projected"]["sources"]
+        self.assertEqual(vols["live"]["projected"]["defaultMode"], 0o440)
+        self.assertEqual(src, [
+            {"configMap": {"name": "fx-gw-1-client", "items": [{"key": "client-config.yaml", "path": "live/issuer/client-config.yaml"}, {"key": "issuer-gw.pem", "path": "gw/issuer-gw.pem"}, {"key": "public-params.bin", "path": "live/public-params.bin"}]}},
+            {"secret": {"name": "fx-gw-1-client", "items": [{"key": "gw.key", "path": "gw/issuer-gw.key"}]}},
+            {"configMap": {"name": "rdbi-public", "items": [{"key": "ca-bundle.pem", "path": "live/issuer/tls-ca.crt"}]}}])
+        mounts = {m["name"]: (m["mountPath"], m.get("readOnly", False)) for m in spec["containers"][0]["volumeMounts"]}
+        self.assertEqual(mounts, {"home": ("/home/rdbi", False), "live": ("/home/rdbi/.fabricx-token", True)})
+
+    def test_command_env_and_label(self):
+        job = self.by(self.pp(), "Job")
+        c = job["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(c["command"], ["rdbi-driver", "setup-pp"])
+        self.assertEqual(c["env"], [{"name": "HOME", "value": "/home/rdbi"}, {"name": "NAMESPACE", "value": "rd_dfabi_v2"}])
+        self.assertEqual(job["spec"]["template"]["metadata"]["labels"][LOCK], "true")
+        self.assertEqual((job["spec"]["backoffLimit"], job["spec"]["activeDeadlineSeconds"], job["spec"]["ttlSecondsAfterFinished"]), (0, 180, 900))
+        render.check_locked(self.pp())
+
+    def test_egress_is_the_issuer_view_port_plus_dns_only(self):
+        np = self.by(self.pp(), "NetworkPolicy")["spec"]
+        self.assertEqual(np["policyTypes"], ["Ingress", "Egress"])
+        self.assertNotIn("ingress", np)
+        self.assertEqual(np["egress"], [
+            {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": "rdbi-bi"}}}], "ports": [{"port": 5100, "protocol": "TCP"}]},
+            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}])
+
+    def test_hardened_and_checked(self):
+        spec = self.by(self.pp(), "Job")["spec"]["template"]["spec"]
+        self.assertFalse(spec["automountServiceAccountToken"])
+        self.assertTrue(spec["containers"][0]["securityContext"]["readOnlyRootFilesystem"])
+        self.assertEqual(spec["imagePullSecrets"], [{"name": "ghcr-pull"}])
+        for bad in (dict(image="repo:latest"), dict(name="A B"), dict(namespace="x y")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    self.pp(**bad)
+        with self.assertRaises(SystemExit):
+            render.render_setuppp("bank-a", image=IMG, name="pp1")
+
+    def test_namespace_is_an_argument_with_the_default(self):
+        c = self.by(self.pp(namespace="rd_other"), "Job")["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(c["env"][1], {"name": "NAMESPACE", "value": "rd_other"})
+
+
 if __name__ == "__main__":
     unittest.main()
