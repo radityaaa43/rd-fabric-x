@@ -16,7 +16,7 @@ DIGEST = "ghcr.io/hyperledger/fabric-ca@sha256:87c36f0b655838e2c3b00379cafc6efb3
 
 
 def docs(party):
-    return list(yaml.safe_load_all(render.render(party)))
+    return list(yaml.safe_load_all(render.render(party, zone="test-zone" if party == "bank-c" else None)))
 
 
 class Manifests(unittest.TestCase):
@@ -44,13 +44,21 @@ class Manifests(unittest.TestCase):
                 self.assertIn("requests", c["resources"])
             self.assertEqual(dep["spec"]["strategy"], {"type": "Recreate"})   # one PVC, ReadWriteOnce
 
-    def test_zone_pinned_on_cluster1_only(self):
+    def test_zone_pinned(self):
         # WaitForFirstConsumer binds the disk to the zone of its first pod; the nodes with free disk slots are in 5b (k8s.py ZONE)
+        sel = lambda p, **kw: next(x for x in list(yaml.safe_load_all(render.render(p, **kw))) if x["kind"] == "Deployment")["spec"]["template"]["spec"].get("nodeSelector")
         for p in ("bi", "bank-a", "bank-b"):
-            dep = next(x for x in docs(p) if x["kind"] == "Deployment")
-            self.assertEqual(dep["spec"]["template"]["spec"]["nodeSelector"], {"topology.kubernetes.io/zone": "ap-southeast-5b"})
-        dep = next(x for x in docs("bank-c") if x["kind"] == "Deployment")
-        self.assertNotIn("nodeSelector", dep["spec"]["template"]["spec"])   # cluster 2: zone/nodes named by PRE, not guessed
+            self.assertEqual(sel(p), {"topology.kubernetes.io/zone": "ap-southeast-5b"})        # default
+            self.assertEqual(sel(p, zone="ap-southeast-5a"), {"topology.kubernetes.io/zone": "ap-southeast-5a"})
+        self.assertEqual(sel("bank-c", zone="ap-southeast-1b"), {"topology.kubernetes.io/zone": "ap-southeast-1b"})
+        with self.assertRaises(SystemExit):
+            render.render("bank-c")                      # cluster 2: the zone comes from the PRE, never guessed
+        r = subprocess.run([sys.executable, os.path.join(HERE, "render.py"), "bank-c", "--zone", "ap-southeast-1b"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("ap-southeast-1b", r.stdout)
+        for bad in ("", "a b", "x:y"):
+            with self.assertRaises(SystemExit):
+                render.render("bank-a", zone=bad)
 
     def test_no_secret_material_in_manifest(self):
         out = render.render("bank-a")
@@ -61,7 +69,7 @@ class Manifests(unittest.TestCase):
         self.assertTrue(any("valueFrom" in e and e["valueFrom"]["secretKeyRef"]["name"] == "fca-org2-admin" for e in env))
 
     def test_cluster2_label_and_refusals(self):
-        self.assertEqual(next(x for x in docs("bank-c") if x["kind"] == "Deployment")["metadata"]["namespace"], "rd-fabricx-bank-c")
+        self.assertEqual(next(x for x in yaml.safe_load_all(render.render("bank-c", zone="z")) if x["kind"] == "Deployment")["metadata"]["namespace"], "rd-fabricx-bank-c")
         for bad in ("bank-d", "fabricx", ""):
             with self.assertRaises(SystemExit):
                 render.render(bad)
