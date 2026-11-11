@@ -314,7 +314,19 @@ class Net(Base):
         self.assertEqual(cfg["notifications"]["address"], "committer-sidecar:5130")
         self.assertEqual(cfg["queries"]["address"], "committer-query-service:5140")
 
-    def test_only_bi_and_checked_inputs(self):
+    def test_readback_is_rendered_for_every_party_with_its_own_names(self):
+        for p, n in PARTIES.items():
+            docs = self.net("readback", p)
+            cfg = yaml.safe_load(self.by(docs, "ConfigMap")["data"]["config.yaml"])
+            self.assertEqual(cfg["msp"]["localMspID"], f"org{n}")
+            self.assertEqual(cfg["queries"]["address"], "committer-query-service:5140")
+            self.assertEqual(self.by(docs, "Job")["metadata"]["namespace"], f"rd-fabricx-{p}")
+            src, _ = self.sources(docs)
+            self.assertEqual([x.get("secret", {}).get("name") or x["configMap"]["name"] for x in src], ["committer-tls", "s14-readback-in-tx1"])
+            np = self.by(docs, "NetworkPolicy")["spec"]
+            self.assertEqual(len(np["egress"]), 2)   # its own query service + CoreDNS, nothing else
+
+    def test_submit_stays_bi_only_and_inputs_are_checked(self):
         for bad in (dict(party="bank-a"), dict(party="bank-d"), dict(image="repo:latest"), dict(tx_name="A B")):
             with self.subTest(bad=bad):
                 with self.assertRaises(SystemExit):
