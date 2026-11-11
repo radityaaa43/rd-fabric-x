@@ -3,7 +3,7 @@ Fake home tree (with the OTHER nodes' files in it, to prove nothing foreign is r
 
   python3 -m unittest discover -s multiorg/fsc
 """
-import base64, json, os, sys, tempfile, unittest
+import base64, http.server, json, os, sys, tempfile, threading, unittest
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -16,8 +16,28 @@ CH = "default-testchannel-token_chaincode"
 ISSUER_W = f"issuer/issuers/peerOrganizations/Orgissuer.example.com/users/issuer@Orgissuer.example.com/msp"
 
 
+class Api(http.server.BaseHTTPRequestHandler):
+    calls = []
+    status = 200
+
+    def do_PATCH(self):
+        n = int(self.headers.get("Content-Length", 0))
+        Api.calls.append({"method": "PATCH", "path": self.path, "ctype": self.headers.get("Content-Type"), "auth": self.headers.get("Authorization"), "body": self.rfile.read(n)})
+        self.send_response(Api.status)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"message": "ok" if Api.status == 200 else 'secrets "x" is forbidden'}).encode())
+
+    def log_message(self, *a):
+        pass
+
+
 class Flow(unittest.TestCase):
     def setUp(self):
+        Api.calls, Api.status = [], 200
+        self.httpd = http.server.HTTPServer(("127.0.0.1", 0), Api)
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+        self.addCleanup(self.httpd.shutdown)
         self.tmp = tempfile.TemporaryDirectory()
         self.home = os.path.join(self.tmp.name, "home")
         t = os.path.join(self.tmp.name, "live")
@@ -34,6 +54,7 @@ class Flow(unittest.TestCase):
             self.put(f"livegen/token/crypto/{CH}/idemix/{n}/msp/IssuerPublicKey", f"WALLETMSP:{n}")
         self.put(f"livegen/token/crypto/{CH}/{ISSUER_W}/keystore/priv_sk", "ISSUERKEY")
         self.put(f"livegen/token/crypto/{CH}/{ISSUER_W}/signcerts/cert.pem", "ISSUERCERT")
+        self.put(f"livegen/token/crypto/{CH}/{ISSUER_W}/admincerts/issuer@Orgissuer.example.com-cert.pem", "ISSUERADMIN")   # as in the real tree: '@' is no valid Secret key character
         self.bin = os.path.join(self.tmp.name, "bin")
         self.log = os.path.join(self.tmp.name, "log")
         os.makedirs(self.bin)
@@ -46,6 +67,12 @@ class Flow(unittest.TestCase):
         os.environ["PATH"] = self.bin + ":" + os.environ["PATH"]
         os.environ["STUB_LOG"] = self.log
         self.keys_out = os.path.join(self.tmp.name, "keys.json")
+        self.kubeconfig = os.path.join(self.tmp.name, "kubeconfig")
+        with open(self.kubeconfig, "w") as f:
+            yaml.safe_dump({"apiVersion": "v1", "kind": "Config", "current-context": "c",
+                            "clusters": [{"name": "k", "cluster": {"server": f"http://127.0.0.1:{self.httpd.server_port}"}}],
+                            "users": [{"name": "u", "user": {"token": "TESTTOKEN"}}],
+                            "contexts": [{"name": "c", "context": {"cluster": "k", "user": "u"}}]}, f)
 
     def tearDown(self):
         for k, v in self.env.items():
@@ -76,10 +103,11 @@ class Flow(unittest.TestCase):
             return f.read()
 
     def run_import(self, party="bank-a", **kw):
-        import_central.import_central(party, f"rd-fabricx-{party}", "/k", self.templates, self.home, self.keys_out, **kw)
+        import_central.import_central(party, f"rd-fabricx-{party}", self.kubeconfig, self.templates, self.home, self.keys_out, **kw)
 
     def patch(self):
-        return json.loads(self.logtext("kubectl-stdin.log"))["data"]
+        self.assertEqual(len(Api.calls), 1)
+        return json.loads(Api.calls[0]["body"])["data"]
 
     def test_bank_gets_its_own_anon_and_owner_wallet_only(self):
         self.run_import("bank-a")
@@ -106,14 +134,32 @@ class Flow(unittest.TestCase):
         self.run_import("bank-b")
         self.assertFalse([k for k in self.patch() if "endorser-3" in k])
 
-    def test_patch_goes_through_stdin_never_argv_and_names_the_secret(self):
+    def test_one_direct_api_patch_with_the_party_token_and_no_kubectl(self):
         self.run_import("bank-a")
-        argv = self.logtext("kubectl.log")
-        self.assertIn("patch secret rdbi-bank2-files", argv)
-        self.assertIn("--type merge", argv)
-        self.assertIn("--patch-file /dev/stdin", argv)
-        for bad in ("WALLET", "ANON", "ISSUERKEY", "data"):
-            self.assertNotIn(bad, argv.replace("--patch-file", ""))
+        c = Api.calls[0]
+        self.assertEqual((c["method"], c["path"]), ("PATCH", "/api/v1/namespaces/rd-fabricx-bank-a/secrets/rdbi-bank2-files"))   # PATCH only: the Role has no `get`
+        self.assertEqual(c["ctype"], "application/merge-patch+json")
+        self.assertEqual(c["auth"], "Bearer TESTTOKEN")
+        self.assertEqual(self.logtext("kubectl.log"), "")   # kubectl would GET first (forbidden by the party-admin Role) and is not used
+
+    def test_invalid_characters_in_file_names_are_sanitized_and_collisions_refused(self):
+        self.run_import("bi")
+        self.assertIn("own__issuer__wallets__issuer-msp__admincerts__issuer_Orgissuer.example.com-cert.pem", self.patch())
+        Api.calls.clear()
+        self.put(f"livegen/token/crypto/{CH}/{ISSUER_W}/admincerts/issuer#Orgissuer.example.com-cert.pem", "X")   # same sanitized name as the '@' one
+        with self.assertRaises(SystemExit):
+            self.run_import("bi")
+        self.assertEqual(Api.calls, [])
+
+    def test_api_error_is_reported_without_token_or_values(self):
+        Api.status = 403
+        with self.assertRaises(SystemExit) as cm:
+            self.run_import("bank-a")
+        msg = str(cm.exception)
+        self.assertIn("403", msg)
+        self.assertNotIn("TESTTOKEN", msg)
+        self.assertNotIn(base64.b64encode(b"WALLET:bank2").decode(), msg)
+        self.assertFalse(os.path.exists(self.keys_out))   # no keys file when the patch failed
 
     def test_keys_file_has_names_only(self):
         self.run_import("bank-a")
@@ -138,10 +184,10 @@ class Flow(unittest.TestCase):
         os.symlink("/etc/passwd", os.path.join(self.home, "ids/anon/msp/IssuerPublicKey"))
         with self.assertRaises(SystemExit):
             self.run_import("bank-a")
-        self.assertEqual(self.logtext("kubectl.log"), "")
+        self.assertEqual(Api.calls, [])
         with self.assertRaises(SystemExit):
-            import_central.import_central("bank-a", "rd-fabricx-bank-b", "/k", self.templates, self.home, self.keys_out)
-        self.assertEqual(self.logtext("kubectl.log"), "")
+            import_central.import_central("bank-a", "rd-fabricx-bank-b", self.kubeconfig, self.templates, self.home, self.keys_out)
+        self.assertEqual(Api.calls, [])
 
     def test_nothing_to_import_for_an_empty_source_dir_is_refused(self):
         import shutil
@@ -149,7 +195,7 @@ class Flow(unittest.TestCase):
         os.makedirs(os.path.join(self.home, "ids/anon/msp"))
         with self.assertRaises(SystemExit):
             self.run_import("bank-a")
-        self.assertEqual(self.logtext("kubectl.log"), "")
+        self.assertEqual(Api.calls, [])
 
 
 if __name__ == "__main__":

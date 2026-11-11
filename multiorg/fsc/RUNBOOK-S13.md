@@ -11,6 +11,13 @@ Status: repo only. Nothing here touches a cluster. Source: final-design/fabricx/
 ## Pod layout (what the render must produce)
 `$T/own/<node>/{fsc/{cert.pem,key.pem,tls.crt,tls.key,tls-ca.crt,admin.pem},tls/{cert.pem,key.pem},ids/<node>/msp/...}` from the Secret items (`secret_path()` restores the sub-path), `$T/public/...` from ConfigMap `rdbi-public` (the other orgs' public trees + all four TLS CAs), `$T/live/<node>/{data,trace.out}` = the PVC.
 
+## Import of the central material: two facts found on the first live attempt (2026-11-12, stopped with 0 writes)
+- File names: the issuer wallet MSP holds `admincerts/issuer@Orgissuer.example.com-cert.pem`; `@` is not a valid Secret key character, so `import_central.py` sanitizes every character outside `[-._a-zA-Z0-9]` to `_` in the KEY (and so in the pod file name) and refuses two files that collide afterwards. This is safe because an MSP directory is read by directory scan, not by file name: `fabric-x-common msp/configbuilder.go` `getMspConfig` loads `admincerts` with `getPemMaterialFromDir`, which reads every file of the directory.
+- Mechanism: the party-admin Role has `create/update/patch` on secrets but NO `get`, and `kubectl patch` GETs first (Forbidden). The tool therefore sends ONE direct API call `PATCH /api/v1/namespaces/<ns>/secrets/rdbi-<pod>-files` (merge-patch+json) with the party kubeconfig's own server/CA/token, read in memory, never on argv or in output, error text scrubbed. Same credential, verb and object as `kubectl patch`; no RBAC change; no cluster-admin credential.
+
+## P2P LoadBalancer Service (render --p2p-lb-acl): shape
+`service.beta.kubernetes.io/backend-type: eni` is part of the S10b shape the orchestrator approved (with `externalTrafficPolicy: Cluster`, existing ACL ids, ACL annotations in the FIRST apply). It is a CHOICE, not a proven dependency of the ACL/listener: besu's live zeto besu-p2p Services on bank-a and bank-b carry only the three ACL annotations with eTP Local and no eni and bank-c peers through them (rd-besu `zeto/k8s/paladin/README.md`, "S10" and "S10b run notes"). The `100.64.0.0/10` health-check element of the pod NetworkPolicy is added only AFTER the annotation/listener read-back; positive control from the OTHER cluster's egress /32 and the hosted-runner negative need pods behind the Service.
+
 ## Unverified (the first node start on the cluster settles them)
 - The node dials the orderers by the genesis names (`router-<N>.arma.rd` etc., port 8013) and needs the hostAliases and egress the render gives it (inferred from the old conntrack note in opa/networkpolicy.yaml:13, not proven).
 - The state PVC and the layout init run as uid 10001 with fsGroup 10001 (no root step, as k8s.py's restricted form).
