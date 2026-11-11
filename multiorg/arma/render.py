@@ -34,6 +34,7 @@ HOST = "{role}-{n}.arma.rd"   # genesis Host of every role (decision A: one conf
 IPS = {"cluster1": {1: "10.200.55.11", 2: "10.200.27.215", 3: "10.200.63.143", 4: "47.236.199.240"},
        "cluster2": {1: "8.215.24.249", 2: "8.215.30.255", 3: "147.139.133.68", 4: "10.210.48.103"}}
 # Ingress allowed from the OTHER cluster: its egress address. cluster1 namespaces allow cluster 2's, bank-c (cluster 2) allows cluster 1's.
+CLB_HEALTH = "100.64.0.0/10"   # opt-in element of allow-arma-peers, S10b rule: only AFTER the CLB annotation/listener ACL read-back (backend-type eni health checks come from here)
 PEER_EGRESS = {"cluster1": "47.237.84.150/32", "cluster2": "8.215.62.92/32"}
 # [unverified] first-guess sizes, to be settled by the first run
 RESOURCES = {"requests": {"cpu": "50m", "memory": "128Mi", "ephemeral-storage": "64Mi"},
@@ -135,7 +136,7 @@ def node_config(text, role, n, msp_id, ops_port):
     return "".join(out)
 
 
-def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zone=None, storage_class=None, ips=None, msp_id_format="org{n}"):
+def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zone=None, storage_class=None, ips=None, msp_id_format="org{n}", clb_health_cidr=None):
     if party not in PARTY_N:
         die(f"party {party!r} unknown; use one of {', '.join(PARTY_N)}")
     if not isinstance(image, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._/:-]*@sha256:[0-9a-f]{64}", image):
@@ -171,7 +172,9 @@ def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zo
             cfg = node_config(f.read(), role, n, msp_id, 7060 + i)
         docs.append({"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(f"arma-config-{ID_ARG[role]}-{n}"), "data": {"node-config.yaml": cfg}})
 
-    peers = ([{"namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}}}] if cluster == "cluster1" else []) + [{"ipBlock": {"cidr": PEER_EGRESS[cluster]}}]
+    if clb_health_cidr is not None and clb_health_cidr != CLB_HEALTH:
+        die(f"--clb-health-cidr must be exactly {CLB_HEALTH} (the CLB health-check source; nothing wider or narrower)")
+    peers = ([{"namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}}}] if cluster == "cluster1" else []) + [{"ipBlock": {"cidr": PEER_EGRESS[cluster]}}] + ([{"ipBlock": {"cidr": clb_health_cidr}}] if clb_health_cidr else [])
     docs.append({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta("allow-arma-peers"),
                  "spec": {"podSelector": {"matchLabels": {"rd-fabricx/arma-party": str(n)}}, "policyTypes": ["Ingress"],
                           # [unverified] that the Terway policy engine sees the preserved client source IP behind the CLB (externalTrafficPolicy Local)
@@ -226,7 +229,8 @@ if __name__ == "__main__":
     p.add_argument("--image", default=IMAGE)
     p.add_argument("--replicas", type=int, default=1)
     p.add_argument("--msp-id-format", default="org{n}")
+    p.add_argument("--clb-health-cidr")
     a = p.parse_args()
     if not (a.exchange and a.genesis and a.genesis_sha256):
         sys.exit(__doc__)
-    sys.stdout.write(render(a.party, a.exchange, a.genesis, a.genesis_sha256, a.image, a.replicas, a.zone, a.storage_class, a.ips, a.msp_id_format))
+    sys.stdout.write(render(a.party, a.exchange, a.genesis, a.genesis_sha256, a.image, a.replicas, a.zone, a.storage_class, a.ips, a.msp_id_format, a.clb_health_cidr))
