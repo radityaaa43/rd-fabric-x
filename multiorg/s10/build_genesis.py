@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Build the Arma genesis block from the four orgs' PUBLIC exchange trees (fabricx S10 prep; no cluster, no key read).
 
-usage: build_genesis.py --exchange DIR --armageddon BIN --sample-config DIR --out DIR [--heads 1=<sha256>,2=...]
+usage: build_genesis.py --exchange DIR --armageddon BIN --sample-config DIR --out DIR --heads 1=<sha256>,2=...
 DIR holds org1..org4 (output of multiorg/fca/enroll.py). BIN is armageddon built from hyperledger/fabric-x-orderer@dd296e3 and
---sample-config its testutil/fabric/sampleconfig. --heads are the sha256 of each org's MANIFEST.sha256 as the org announced it.
+--sample-config its testutil/fabric/sampleconfig. --heads (required on the command line) are the sha256 of each org's MANIFEST.sha256 as the org announced it.
 Steps: check_exchange on every org (refuse otherwise) -> certs-only baseDir -> shared_config.yaml from endpoints.yaml (Consensus,
 Batching and MaxPartyID are copied from upstream's own `generate` output, run in a scratch dir with throwaway keys that is shredded)
 -> `createBlock` run INSIDE baseDir (its shared-config paths resolve against the CWD) -> prints the block's sha256 as JSON.
@@ -77,7 +77,7 @@ def build(exchange, armageddon, sample, out, manifest_heads=None):
         found = check_exchange.problems(f"{exchange}/org{n}", n)
         if found:
             die(f"org{n} exchange tree is not clean: {'; '.join(found[:5])}")
-        if manifest_heads and manifest_heads.get(n) != sha256_file(f"{exchange}/org{n}/MANIFEST.sha256"):
+        if manifest_heads is not None and manifest_heads.get(n) != sha256_file(f"{exchange}/org{n}/MANIFEST.sha256"):
             die(f"org{n}: MANIFEST.sha256 hash differs from the one the org announced")
     if os.path.exists(out) and os.listdir(out):
         die(f"{out} exists and is not empty")
@@ -106,5 +106,10 @@ if __name__ == "__main__":
         opt[a[0]], a = a[1], a[2:]
     if a or not {"--exchange", "--armageddon", "--sample-config", "--out"} <= set(opt):
         sys.exit(__doc__)
-    heads = {int(k): v for k, v in (kv.split("=") for kv in opt["--heads"].split(","))} if "--heads" in opt else None
+    if "--heads" not in opt:   # the announced hashes are the only link to what each org really sent: no build without them
+        die("--heads is required (sha256 of each org's MANIFEST.sha256 as announced by the org): 1=<hex>,2=<hex>,...")
+    try:
+        heads = {int(k): v for k, v in (kv.split("=") for kv in opt["--heads"].split(","))}
+    except ValueError:
+        die("--heads must look like 1=<sha256>,2=<sha256>,...")
     print(json.dumps(build(opt["--exchange"], opt["--armageddon"], opt["--sample-config"], opt["--out"], heads), indent=1))
