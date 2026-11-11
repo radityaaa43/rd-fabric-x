@@ -40,15 +40,17 @@ If each Service gets its own CLB instance: 4 per party, 16 in total (4 parties x
 
 ## Annotations
 
-Read in the Alibaba Cloud ACK documentation, "Use annotations to configure load balancing"
-(https://www.alibabacloud.com/help/en/ack/serverless-kubernetes/user-guide/use-annotations-to-configure-load-balancing),
+Read in the Alibaba Cloud ACK documentation for ACK managed clusters, "How to configure Classic Load Balancer (CLB) for ACK clusters using annotations"
+(https://www.alibabacloud.com/help/en/ack/ack-managed-and-ack-dedicated/user-guide/add-annotations-to-the-yaml-file-of-a-service-to-configure-clb-instances;
+the ACK Serverless page of the same title was read first and has the same content). Its ACL example sets `acl-status: "on"`, `acl-id`
+("does not support multiple policy groups": one ACL per Service) and `acl-type: "white"` on a `type: LoadBalancer` Service,
 prefix `service.beta.kubernetes.io/alibaba-cloud-loadbalancer-`: `acl-status` (`on`/`off`), `acl-id` (required when status is `on`,
 one group only), `acl-type` (`white`/`black`), `address-type` (`internet` default / `intranet`). ACL annotations need CCM
 v1.9.3.164-g2105d2e-aliyun or later; `address-type` needs CCM v1.9.3 or later. The CCM version on the clusters was not checked.
 
 ## Open points
 
-- [unverified] `spec.loadBalancerSourceRanges`: standard Kubernetes field, but the ACK page above does not mention it. Whether the
+- [unverified] `spec.loadBalancerSourceRanges`: standard Kubernetes field, but the ACK managed page above does not mention it (searched). Whether the
   Alibaba CCM honours it next to the ACL annotations is not verified. The ACL is the control that was read in the docs.
 - [unverified] Selector `app.kubernetes.io/name: <role>-<N>`: the S11 role pods do not exist yet; this is an assumption about their labels.
   Check against the S11 manifests before apply.
