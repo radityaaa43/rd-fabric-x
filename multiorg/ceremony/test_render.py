@@ -229,5 +229,85 @@ class Locked(Base):
             self.probe("bank-d")
 
 
+class Net(Base):
+    """S14 submit + read-back Jobs of BI (orchestrator S1): committer-tls is the TLS client identity for the router / sidecar / query mTLS."""
+
+    def net(self, kind, party="bi", **kw):
+        a = dict(image=IMG, tx_name="tx1")
+        if kind == "submit":
+            a.update(tx=self.tx)
+        a.update(cacert=self.ca)
+        a.update(kw)
+        return list(yaml.safe_load_all(render.render_net(kind, party, **a)))
+
+    def sources(self, docs):
+        v = self.by(docs, "Job")["spec"]["template"]["spec"]["volumes"]
+        self.assertEqual(len(v), 1)
+        return v[0]["projected"]["sources"], v[0]["projected"]["defaultMode"]
+
+    def test_submit_volumes_are_exactly_the_conditions_list(self):
+        src, mode = self.sources(self.net("submit"))
+        self.assertEqual(mode, 0o440)   # 0400 would be unreadable for uid 10001 (files are root-owned, fsGroup gives group read)
+        self.assertEqual(len(src), 3)
+        self.assertEqual(src[0], {"secret": {"name": "orderer-admin-1-secret", "items": [{"key": "msp-keystore-priv_sk", "path": "msp/keystore/priv_sk"}, {"key": "msp-signcert.pem", "path": "msp/signcerts/cert.pem"}]}})
+        self.assertEqual(src[1], {"secret": {"name": "committer-tls", "items": [{"key": "server.crt", "path": "tls/client.crt"}, {"key": "server.key", "path": "tls/client.key"}, {"key": "ca.crt", "path": "tls/ca.crt"}]}})
+        self.assertEqual(src[2]["configMap"]["name"], "s14-submit-in-tx1")
+        self.assertEqual(sorted(i["path"] for i in src[2]["configMap"]["items"]), ["config.yaml", "tlsca.pem", "tx.json"])
+
+    def test_readback_has_no_signing_key_and_no_tx(self):
+        docs = self.net("readback")
+        src, _ = self.sources(docs)
+        self.assertEqual([s_.get("secret", {}).get("name") or s_["configMap"]["name"] for s_ in src], ["committer-tls", "s14-readback-in-tx1"])
+        self.assertNotIn("orderer-admin", yaml.safe_dump(docs))
+        self.assertEqual(sorted(self.by(docs, "ConfigMap")["data"]), ["config.yaml", "tlsca.pem"])
+
+    def test_commands_are_exact_and_without_a_shell(self):
+        c = lambda k: self.by(self.net(k), "Job")["spec"]["template"]["spec"]["containers"][0]
+        self.assertEqual(c("submit")["command"], ["fxconfig", "--config", "/w/config.yaml", "tx", "submit", "/w/tx.json", "--wait"])
+        self.assertEqual(c("readback")["command"], ["fxconfig", "--config", "/w/config.yaml", "namespace", "list"])
+
+    def test_pod_is_locked_hardened_bounded(self):
+        for k in ("submit", "readback"):
+            job = self.by(self.net(k), "Job")
+            pod = job["spec"]["template"]
+            self.assertEqual(pod["metadata"]["labels"][LOCK], "true")
+            self.assertEqual((job["spec"]["backoffLimit"], job["spec"]["activeDeadlineSeconds"], job["spec"]["ttlSecondsAfterFinished"]), (0, 120, 900))
+            self.assertFalse(pod["spec"]["automountServiceAccountToken"])
+            sc = pod["spec"]["containers"][0]["securityContext"]
+            self.assertTrue(sc["readOnlyRootFilesystem"] and sc["runAsNonRoot"] and not sc["allowPrivilegeEscalation"])
+            self.assertNotIn("env", pod["spec"]["containers"][0])
+            render.check_locked(self.net(k))
+
+    def test_egress_is_exactly_the_named_endpoints_plus_dns(self):
+        dns = {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}]}
+        pod = lambda a, p: {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": a}}}], "ports": [{"port": p, "protocol": "TCP"}]}
+        sub, rb = self.by(self.net("submit"), "NetworkPolicy"), self.by(self.net("readback"), "NetworkPolicy")
+        self.assertEqual(sub["spec"]["egress"], [pod("orderer-router-1", 8013), pod("committer-sidecar", 5130), dns])
+        self.assertEqual(rb["spec"]["egress"], [pod("committer-query", 5140), dns])
+        for np in (sub, rb):
+            self.assertEqual(np["spec"]["policyTypes"], ["Ingress", "Egress"])
+            self.assertNotIn("ingress", np["spec"])
+
+    def test_config_points_at_in_cluster_names_with_the_router_sni(self):
+        cfg = yaml.safe_load(self.by(self.net("submit"), "ConfigMap")["data"]["config.yaml"])
+        self.assertEqual(cfg["msp"], {"localMspID": "org1", "configPath": "/w/msp"})
+        self.assertEqual(cfg["tls"], {"enabled": True, "clientCert": "/w/tls/client.crt", "clientKey": "/w/tls/client.key", "rootCerts": ["/w/tlsca.pem", "/w/tls/ca.crt"]})
+        self.assertEqual(cfg["orderer"]["address"], "lb-1:8013")
+        self.assertEqual(cfg["orderer"]["tls"]["serverNameOverride"], "router-1.arma.rd")
+        self.assertEqual(cfg["notifications"]["address"], "committer-sidecar:5130")
+        self.assertEqual(cfg["queries"]["address"], "committer-query-service:5140")
+
+    def test_only_bi_and_checked_inputs(self):
+        for bad in (dict(party="bank-a"), dict(party="bank-d"), dict(image="repo:latest"), dict(tx_name="A B")):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    self.net("submit", **bad)
+        with self.assertRaises(SystemExit):
+            self.net("other")
+        open(self.ca, "w").write(CERT + "PRIVATE KEY")
+        with self.assertRaises(SystemExit):
+            self.net("submit")
+
+
 if __name__ == "__main__":
     unittest.main()
