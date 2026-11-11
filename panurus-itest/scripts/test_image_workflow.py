@@ -42,8 +42,15 @@ class ImageWorkflow(unittest.TestCase):
         self.assertTrue(w["sbom"])
         self.assertEqual(w["provenance"], "mode=max")
         self.assertEqual(w["file"], "panurus-itest/k8s/Dockerfile")
-        self.assertRegex(w["tags"], r"^ghcr\.io/\$\{\{ github\.repository_owner \}\}/rdbi-node:sha-\$\{\{ github\.sha \}\}$")   # an immutable tag per commit, never :latest
+        self.assertRegex(w["tags"], r"^ghcr\.io/\$\{\{ github\.repository_owner \}\}/rdbi-node-ci:sha-\$\{\{ github\.sha \}\}$")   # an immutable tag per commit, never :latest
         self.assertNotIn("latest", w["tags"])
+
+    def test_new_package_name_and_the_old_one_is_untouched(self):
+        text = open(WF).read()
+        self.assertNotRegex(text, r"ghcr\.io/\S*/rdbi-node(?!-ci)")   # never push, tag or attest the old registry package rdbi-node
+        self.assertIn("ghcr.io/${{ github.repository_owner }}/rdbi-node-ci@${{ steps.build.outputs.digest }}", text)
+        at = [s for s in steps(load()) if str(s.get("uses", "")).startswith("actions/attest-build-provenance@")][0]
+        self.assertEqual(at["with"]["subject-name"], "ghcr.io/${{ github.repository_owner }}/rdbi-node-ci")
 
     def test_signed_attestation_of_the_digest(self):
         at = [s for s in steps(load()) if str(s.get("uses", "")).startswith("actions/attest-build-provenance@")]

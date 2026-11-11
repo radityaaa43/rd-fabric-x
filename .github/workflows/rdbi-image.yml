@@ -1,11 +1,15 @@
 name: rdbi-image
 # Rebuild of the rdbi-node image (FSC node + rdbi-driver, one image for the FSC pods and the fx-gw-<N> fxapi) from the pinned Panurus v0.24.0 plus
 # our patches, with an SBOM and max provenance attached to the pushed image, and a signed GitHub attestation of its digest (final design S15 gate).
+# The package is rdbi-node-ci (created and linked to this repo by GITHUB_TOKEN, private): the older package rdbi-node was pushed with a personal token, is not linked to this repo and stays untouched (run 43080311512: permission_denied: read_package).
 # Manual only: run it from the Actions tab (or `gh workflow run rdbi-image.yml`); the job summary and the log print the image digest to pin in the renders.
 on:
   workflow_dispatch:
 permissions:
   contents: read
+defaults:
+  run:
+    shell: bash
 jobs:
   image:
     runs-on: ubuntu-latest
@@ -64,7 +68,7 @@ jobs:
       - name: Scan the image layers for private keys
         run: |
           docker save rdbi-node:scan -o "$RUNNER_TEMP/image.tar"
-          python3 panurus-itest/scripts/scan_image_keys.py "$RUNNER_TEMP/image.tar" | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 panurus-itest/scripts/scan_image_keys.py "$RUNNER_TEMP/image.tar" --allow panurus-itest/k8s/scan-allow.txt --dockerfile panurus-itest/k8s/Dockerfile | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: docker/login-action@74a5d142397b4f367a81961eba4e8cd7edddf772 # v3.4.0
         with:
           registry: ghcr.io
@@ -77,14 +81,14 @@ jobs:
           context: bin
           file: panurus-itest/k8s/Dockerfile
           push: true
-          tags: ghcr.io/${{ github.repository_owner }}/rdbi-node:sha-${{ github.sha }}
+          tags: ghcr.io/${{ github.repository_owner }}/rdbi-node-ci:sha-${{ github.sha }}
           sbom: true
           provenance: mode=max
       - uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
-          subject-name: ghcr.io/${{ github.repository_owner }}/rdbi-node
+          subject-name: ghcr.io/${{ github.repository_owner }}/rdbi-node-ci
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
       - name: Report the digest
         run: |
-          echo "image: ghcr.io/${{ github.repository_owner }}/rdbi-node@${{ steps.build.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "image: ghcr.io/${{ github.repository_owner }}/rdbi-node-ci@${{ steps.build.outputs.digest }}" | tee -a "$GITHUB_STEP_SUMMARY"
