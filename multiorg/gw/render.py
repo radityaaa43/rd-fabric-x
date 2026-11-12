@@ -89,7 +89,24 @@ def opa_config_for(path, party):
     return yaml.safe_dump(cfg, sort_keys=False)
 
 
-def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert, gw_ips, tls_exchange, lb=None, public_params=None, restrict_egress=False):
+def ingress_source(spec):
+    """--ingress-allow forms: nspod=<namespace>/<k=v[,k=v]> (namespace by exact name + pod labels, never empty) or ip=<ipv4>/<10..32> (never wider than /10, never 0.0.0.0)."""
+    m = re.fullmatch(r"nspod=([a-z0-9]([a-z0-9-]*[a-z0-9])?)/([A-Za-z0-9._/-]+=[A-Za-z0-9._-]+(,[A-Za-z0-9._/-]+=[A-Za-z0-9._-]+)*)", spec or "")
+    if m:
+        return {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": m.group(1)}}, "podSelector": {"matchLabels": dict(x.split("=", 1) for x in m.group(3).split(","))}}
+    m = re.fullmatch(r"ip=(\d{1,3}(?:\.\d{1,3}){3})/(\d{1,2})", spec or "")
+    if m:
+        try:
+            a = ipaddress.IPv4Address(m.group(1))
+        except ValueError:
+            die(f"--ingress-allow {spec!r}: bad address")
+        if not 10 <= int(m.group(2)) <= 32 or int(a) == 0:
+            die(f"--ingress-allow {spec!r}: the prefix must be /10../32 and the address not 0.0.0.0")
+        return {"ipBlock": {"cidr": f"{a}/{m.group(2)}"}}
+    die(f"--ingress-allow {spec!r} must be nspod=<ns>/<k=v,..> or ip=<ipv4>/<10..32>")
+
+
+def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert, gw_ips, tls_exchange, lb=None, public_params=None, restrict_egress=False, ingress_allow=None):
     if party not in PARTY_N:
         die(f"party {party!r} must be one of {', '.join(PARTY_N)}")
     for what, v in (("--image", image), ("--envoy-image", envoy_image), ("--opa-image", opa_image)):
@@ -204,6 +221,12 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
                      "spec": {"type": "LoadBalancer", "externalTrafficPolicy": "Cluster", "loadBalancerSourceRanges": ranges, "selector": pl,
                               "ports": [{"name": "fxapi", "port": 8443, "targetPort": 8443, "protocol": "TCP"}]}})
     np = {"podSelector": {"matchLabels": pl}, "policyTypes": ["Ingress"], "ingress": [{"ports": [{"protocol": "TCP", "port": 8443}]}]}
+    if ingress_allow is not None:
+        # Ingress narrowing (analyst, HIGH): ports-only ingress admits ANY source. Allowed: the peer gateways of the SAME cluster (namespace + pod; their fxapi dials the Service address, the CNI evaluates after DNAT) and the extra sources given
+        # (Lensa pods by namespace + labels; the SLB source range of the LB/eni path, 100.64.0.0/10, where the LB ACL is the filter: cross-cluster peers and the host arrive through it, and bank-c has no other control).
+        frm = [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": f"rd-fabricx-{same[m]}"}}, "podSelector": {"matchLabels": {"app.kubernetes.io/name": f"fx-gw-{m}"}}} for m in sorted(same)]
+        frm += [ingress_source(x) for x in ingress_allow]
+        np["ingress"] = [{"from": frm, "ports": [{"protocol": "TCP", "port": 8443}]}]
     if restrict_egress:
         # R17 egress form (multiorg/test_netpol_form.py). OPA pulls its bundles from http://bundle-server.rd-zeto-<party>.svc (Service port 80 -> pod 8080). The zeto repo owns that Service;
         # its selector and pod label (app=bundle-server) were READ live on 2026-11-12 in rd-zeto-{bi,bank-a,bank-b,bank-c}: the rule below follows them (same party's namespace only).
@@ -236,13 +259,15 @@ def main():
         ap.add_argument(f"--{o}")
     ap.add_argument("--lb-range", action="append", default=[])
     ap.add_argument("--public-params")
+    ap.add_argument("--restrict-ingress", action="store_true", help="narrow the ingress to the same-cluster peer gateways plus the --ingress-allow sources (default: ports only, any source)")
+    ap.add_argument("--ingress-allow", action="append", default=[], help="nspod=<ns>/<k=v,..> or ip=<ipv4>/<10..32>, repeatable (implies --restrict-ingress)")
     ap.add_argument("--restrict-egress", action="store_true", help="add the R17 egress rules (DNS, own node view, same-party OPA bundle-server, peer gateways; default: Ingress-only)")
     a = ap.parse_args()
     for o in ("templates", "image", "envoy_image", "opa_image", "opa_config", "gw_cert", "gw_ips", "tls_exchange"):
         if not getattr(a, o):
             die(f"--{o.replace('_', '-')} is required")
     lb = {"acl_id": a.lb_acl, "ranges": a.lb_range} if a.lb_acl else None
-    sys.stdout.write(render(a.party, a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, a.gw_cert, a.gw_ips, a.tls_exchange, lb, a.public_params, a.restrict_egress))
+    sys.stdout.write(render(a.party, a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, a.gw_cert, a.gw_ips, a.tls_exchange, lb, a.public_params, a.restrict_egress, (a.ingress_allow if (a.restrict_ingress or a.ingress_allow) else None)))
 
 
 if __name__ == "__main__":
