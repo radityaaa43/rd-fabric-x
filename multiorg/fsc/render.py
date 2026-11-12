@@ -30,6 +30,7 @@ PARTY_N = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
 UID = 10001
 A = "service.beta.kubernetes.io/alibaba-cloud-loadbalancer-"
 LABELS = {"app.kubernetes.io/part-of": "rd-fabricx"}
+LOCK = "rd/egress-locked"   # the namespace policy allow-dns-egress allows ALL egress for pods WITHOUT this label; without it rdbi-traffic (egress) binds nothing (R17)
 
 
 def die(msg):
@@ -200,7 +201,7 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
     spec["affinity"] = {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [arma.role_anti_affinity("fsc", party)]}}   # R22
     pl = {"app.kubernetes.io/name": f"rdbi-{pod}"}
     docs.append({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta(f"rdbi-{pod}", pl),
-                 "spec": {"replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": pl}, "template": {"metadata": {"labels": {**base, **pl, "rd/role": "fabricx-fsc"}}, "spec": spec}}})
+                 "spec": {"replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": pl}, "template": {"metadata": {"labels": {**base, **pl, "rd/role": "fabricx-fsc", LOCK: "true"}}, "spec": spec}}})
     if p2p_lb:
         acl, ranges = p2p_lb.get("acl_id"), p2p_lb.get("ranges") or []
         if not re.fullmatch(r"acl-[a-z0-9]+", acl or ""):
