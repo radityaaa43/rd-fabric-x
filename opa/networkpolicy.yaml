@@ -80,15 +80,3 @@ spec:
   - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: fx-gw-4}}}]
     ports: [{port: 5109}]
   - from: [{podSelector: {matchLabels: {app.kubernetes.io/name: rdbi-driver}}}]
----
-# fabricx-bank-c is the only fabricx-* namespace without default-deny-all (fabricx-bi, -bank-a, -bank-b have it).
-# It runs no pods today (Services only, fabricx.role=remote-proxy), so this changes no traffic; it closes the gap
-# for any pod added later. Same spec as fabricx-bank-a's. Rollback: kubectl -n fabricx-bank-c delete networkpolicy default-deny-all
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: default-deny-all
-  namespace: fabricx-bank-c
-spec:
-  podSelector: {}
-  policyTypes: [Ingress, Egress]

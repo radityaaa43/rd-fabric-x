@@ -15,9 +15,8 @@ Status: design only. No live writes made.
   (each rdbi-bankN pod also holds endorser-N, its committer parts and Postgres).
 - Ports (grpc, p2p, web): issuer 5100-5102, bank2 5103-5105, bank3 5106-5108, bank4 5109-5111,
   endorser-1..4 5112-5123. All ClusterIP. web is disabled.
-- **ns `fabricx` has NO NetworkPolicy today.** Only `fabricx-bi`, `fabricx-bank-a` and `fabricx-bank-b`
-  have `default-deny-all`; `fabricx-bank-c` has none. Those namespaces hold the separate
-  fabricx-transfer-v2 stack, which Lensa does not use.
+- **ns `fabricx` has NO NetworkPolicy today.** Another team's namespaces exist next to it; they are not ours and are
+  never written by this stack.
 - Node memory is tight (member nodes at 91-99%). Paladin gateway sizing: envoy 20m/32Mi (lim 128Mi), opa 20m/64Mi (lim 256Mi).
 - Existing server-side limits (`patches/panurus-auditor-limits.patch`) are set to uint64 max: no real policy is enforced on Fabric-X today.
 
@@ -127,7 +126,6 @@ File: `fabric-x/opa/networkpolicy.yaml`. Server dry-run passes. The evidence is 
 | rdbi-<pod>-ingress | rdbi-bi / rdbi-bankN | part-of=rdbi | that pod's node and endorser p2p (5101+5113, 5104+5116, 5107+5119, 5110+5122) |
 | | | fx-gw-N only | that pod's view gRPC (5100 / 5103 / 5106 / 5109) |
 | | | rdbi-driver | all ports (maintenance or e2e only, while scaled up) |
-| default-deny-all | ns fabricx-bank-c (0 pods) | none | none |
 
 - Bank committers and Postgres are pod-local, so they need no rule. The rdbi pods have no probes.
 - fx-gw pods are not selected. Their door is guarded by mTLS, the same as bank-gw-N in ns paladin.
@@ -179,7 +177,7 @@ Placement (lead condition):
 ## 12. Live-write sequence (each step needs lead go + user go)
 
 Order per lead: bring up fx-gw-N, switch Lensa, verify, then scale rdbi-driver to 0 (this frees memory).
-The NetworkPolicy step also covers `fabricx-bank-c`, which has no default-deny today.
+The NetworkPolicy step covers only the ns `fabricx` objects listed above.
 
 1. Image push (`serve`).
 2. Secrets `fx-gw-N-files`, `fx-gw-N-mtls`, CM `fx-gw-opa`.
