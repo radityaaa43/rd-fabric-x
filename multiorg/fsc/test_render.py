@@ -263,6 +263,11 @@ class Network(Base):
         with self.assertRaises(SystemExit):
             self.r("bank-a", p2p_ips=None)
 
+def r22_term(role, party):
+    """R22 (worker = failure domain): a role pod may not share a worker with the same role of ANOTHER party, across the rd-fabricx-* namespaces."""
+    return {"topologyKey": "kubernetes.io/hostname", "namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}},
+            "labelSelector": {"matchExpressions": [{"key": "rd/role", "operator": "In", "values": [f"fabricx-{role}"]},
+                                                   {"key": "party", "operator": "NotIn", "values": [party]}]}}
 
 class Placement(Base):
     def test_cluster1_defaults_and_bank_c(self):
@@ -276,6 +281,17 @@ class Placement(Base):
         with self.assertRaises(SystemExit):
             self.r("bank-c", storage_class=None)
 
+
+    def test_r22_fsc_pod_never_shares_a_worker_with_another_party_fsc_pod(self):
+        for party, pod in POD.items():
+            docs = self.r(party)
+            d = self.by(docs, "Deployment")[f"rdbi-{pod}"]["spec"]["template"]
+            self.assertEqual(d["metadata"]["labels"]["rd/role"], "fabricx-fsc")
+            self.assertEqual(d["spec"]["affinity"]["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"], [r22_term("fsc", party)])
+            self.assertNotIn("nodeAffinity", d["spec"]["affinity"])
+            others = [x for x in docs if x["kind"] in ("Deployment", "StatefulSet", "Job") and x["metadata"]["name"] != f"rdbi-{pod}"]
+            for x in others:
+                self.assertNotIn("rd/role", x["spec"]["template"]["metadata"]["labels"])
 
 if __name__ == "__main__":
     unittest.main()

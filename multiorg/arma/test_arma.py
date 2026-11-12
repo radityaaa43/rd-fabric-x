@@ -391,6 +391,11 @@ class Image(Base):
         self.assertNotEqual(r.returncode, 0)
         self.assertEqual(r.stdout, "")
 
+def r22_term(role, party):
+    """R22 (worker = failure domain): a role pod may not share a worker with the same role of ANOTHER party, across the rd-fabricx-* namespaces."""
+    return {"topologyKey": "kubernetes.io/hostname", "namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}},
+            "labelSelector": {"matchExpressions": [{"key": "rd/role", "operator": "In", "values": [f"fabricx-{role}"]},
+                                                   {"key": "party", "operator": "NotIn", "values": [party]}]}}
 
 class Placement(Base):
     def spec(self, party, **over):
@@ -429,6 +434,22 @@ class Placement(Base):
             self.refused("bank-a", zone=bad)
         for bad in ("", "a b", "x/y"):
             self.refused("bank-a", storage_class=bad)
+    def test_r22_consenter_and_batcher_never_share_a_worker_with_another_party(self):
+        for p in PARTIES:
+            sts = self.sts(p)
+            self.assertEqual(len(sts), 4)
+            for name, s in sts.items():
+                t = s["spec"]["template"]
+                role = "consenter" if "consenter" in name else "batcher" if "batcher" in name else None
+                req = t["spec"]["affinity"]["podAntiAffinity"].get("requiredDuringSchedulingIgnoredDuringExecution")
+                if role:
+                    self.assertEqual(t["metadata"]["labels"]["rd/role"], f"fabricx-{role}", name)
+                    self.assertEqual(req, [r22_term(role, p)], name)
+                else:   # router/assembler: not in R22 scope
+                    self.assertNotIn("rd/role", t["metadata"]["labels"], name)
+                    self.assertIsNone(req, name)
+                self.assertEqual(len(t["spec"]["affinity"]["podAntiAffinity"]["preferredDuringSchedulingIgnoredDuringExecution"]), 1, name)   # the soft per-party spread stays
+
 
     def test_soft_anti_affinity_within_the_party(self):
         for p, n in PARTIES.items():
