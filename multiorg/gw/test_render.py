@@ -310,7 +310,7 @@ class GwRender(unittest.TestCase):
             self.assertEqual(np["spec"]["podSelector"], {"matchLabels": {"app.kubernetes.io/name": f"fx-gw-{n}"}})
             self.assertEqual(np["spec"]["ingress"], [{"ports": [{"protocol": "TCP", "port": 8443}]}])   # no from-list: mTLS + OPA are the control (zeto bank-gw-ingress)
 
-    # R17: egress is OPT-IN (restrict_egress, --restrict-egress). The default stays Ingress-only because the OPA bundle-server rule cannot be derived from the repo (see render.py).
+    # R17: egress is OPT-IN (restrict_egress, --restrict-egress). The default stays Ingress-only until the live apply of R17 (own window).
     def test_egress_is_off_by_default(self):
         for p, n in PARTIES.items():
             np = by(build(self.root, p), "NetworkPolicy", f"fx-gw-{n}")
@@ -327,6 +327,8 @@ class GwRender(unittest.TestCase):
             {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
              "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
             {"to": [{"podSelector": sel("rdbi-bank2")}], "ports": [{"protocol": "TCP", "port": 5103}]},   # the node view gRPC: client-config address port
+            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "rd-zeto-bank-a"}}, "podSelector": {"matchLabels": {"app": "bundle-server"}}}],
+             "ports": [{"protocol": "TCP", "port": 8080}]},   # OPA bundle pull: Service bundle-server port 80 -> pod 8080, same party's zeto namespace, pod label app=bundle-server (read live 2026-11-12)
             gw("bi", 1), gw("bank-b", 3),
             {"to": [{"ipBlock": {"cidr": "8.8.8.4/32"}}], "ports": [{"protocol": "TCP", "port": 8443}]}])   # bank-c, cluster 2: --gw-ips
 
@@ -335,8 +337,9 @@ class GwRender(unittest.TestCase):
             eg = by(build(self.root, p, restrict_egress=True), "NetworkPolicy", f"fx-gw-{n}")["spec"]["egress"]
             text = yaml.safe_dump(eg)
             self.assertNotIn("podSelector: {}", text)
-            self.assertNotIn("rd-zeto", text)   # the bundle-server selector is not derivable from the repo: not invented
-            same_ns = {to["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] for r in eg for to in r["to"] if "namespaceSelector" in to} - {"kube-system"}
+            zeto = [to for r in eg for to in r["to"] if "rd-zeto" in str(to)]
+            self.assertEqual(zeto, [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": f"rd-zeto-{p}"}}, "podSelector": {"matchLabels": {"app": "bundle-server"}}}])   # the SAME party's bundle-server only
+            same_ns = {to["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] for r in eg for to in r["to"] if "namespaceSelector" in to} - {"kube-system", f"rd-zeto-{p}"}
             blocks = [to["ipBlock"]["cidr"] for r in eg for to in r["to"] if "ipBlock" in to]
             if p == "bank-c":
                 self.assertEqual(same_ns, set())
