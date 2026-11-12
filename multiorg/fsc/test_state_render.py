@@ -27,8 +27,11 @@ def by(ds, kind):
     return r[0]
 
 
+NODE = "member-16031-node"
+
+
 def job(mode, party="bank-b", gen="g1"):
-    return docs(sr.render(mode, party, IMG, gen))
+    return docs(sr.render(mode, party, IMG, gen, node=NODE if mode == "remove-backup" else None))
 
 
 def script(mode, party="bank-b", gen="g1"):
@@ -100,6 +103,20 @@ class Render(unittest.TestCase):
             self.assertEqual(term, [{"labelSelector": {"matchLabels": {"app.kubernetes.io/name": f"rdbi-{pod}"}}, "topologyKey": "kubernetes.io/hostname"}])
         for mode in ("count", "b-prime", "restore"):   # these run with the FSC pod scaled to 0: an affinity to it would leave the Job Pending
             self.assertNotIn("affinity", by(job(mode), "Job")["spec"]["template"]["spec"], mode)
+
+    def test_remove_backup_is_pinned_to_the_node_of_the_rwo_consumer(self):
+        # live 2026-11-12 bank-b: the scheduler put the Job pod on another node than the FSC pod (RWO disk, Multi-Attach). The node is passed in (read fresh) and set as spec.nodeName; the affinity stays.
+        for p in POD:
+            spec = by(docs(sr.render("remove-backup", p, IMG, "g1", node="member-16047-node")), "Job")["spec"]["template"]["spec"]
+            self.assertEqual(spec["nodeName"], "member-16047-node")
+            self.assertEqual(spec["affinity"]["podAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"][0]["labelSelector"]["matchLabels"], {"app.kubernetes.io/name": f"rdbi-{POD[p]}"})
+        for bad in (None, "", " ", "Bad Node", "a/b", "member-1-node\nx"):
+            with self.assertRaises(SystemExit, msg=repr(bad)):
+                sr.render("remove-backup", "bank-b", IMG, "g1", node=bad)
+        for mode in ("count", "b-prime", "restore"):   # no node for the other modes: their renders do not change
+            with self.assertRaises(SystemExit, msg=mode):
+                sr.render(mode, "bank-b", IMG, "g1", node=NODE)
+            self.assertNotIn("nodeName", by(job(mode), "Job")["spec"]["template"]["spec"], mode)
 
     def test_nodes_of_each_party(self):
         for p, nodes in NODES.items():
