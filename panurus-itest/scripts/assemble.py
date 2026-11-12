@@ -51,11 +51,16 @@ def bccsp():
     return {"BCCSP": {"Default": "SW", "SW": {"Hash": "SHA2", "Security": 256}}}
 
 
-# CA bundle: cluster Org1 CA + the four orderer-org CAs (read from the existing secrets, public certs only)
+# CA bundle: cluster Org1 CA + the four orderer-org CAs. PUBLIC certificates, read from local files ($CA_SOURCES/<secret name>.tls-ca.crt, taken from the public exchange tree):
+# no script reads a Secret's content into the client (orchestrator rule 2026-11-12; test_no_secret_value_reads.py)
+CA_SOURCES = os.environ.get("CA_SOURCES", os.path.join(H, "ca-sources"))
+
+
 def secret(name, key):
-    import base64
-    d = json.loads(subprocess.check_output(["kubectl", "-n", "fabricx", "get", "secret", name, "-o", "json"]))["data"][key]
-    return base64.b64decode(d).decode()
+    p = os.path.join(CA_SOURCES, f"{name}.{key}")
+    if not os.path.exists(p):
+        sys.exit(f"missing public CA file {p} (put the {key} of {name} there; this script no longer reads Secrets)")
+    return open(p).read()
 
 bundle = secret("committer-sidecar-secret", "tls-ca.crt")
 for i in range(1, 5):

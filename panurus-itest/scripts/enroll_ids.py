@@ -8,7 +8,7 @@ writes keys under $RDBI_HOME/ids/<node>/{msp,tls,secret} (mode 0700/0600). Re-ru
 Env: KUBECONFIG, RDBI_HOME (default ~/.fabricx-token), CLUSTER_HOST (default 172.24.11.197),
 FABRIC_CA_CLIENT (path to the binary).
 """
-import base64, json, os, re, secrets, subprocess, sys
+import json, os, re, secrets, subprocess, sys
 
 H = os.environ.get("RDBI_HOME", os.path.expanduser("~/.fabricx-token"))
 HOST = os.environ.get("CLUSTER_HOST", "172.24.11.197")
@@ -37,9 +37,8 @@ for msp_id, (ca, port, nodes) in ORGS.items():
     cm = kubectl_json("cm", ca)["data"]["fabric-ca-server-config.yaml"]
     admin_pw = re.search(r'name:\s*"admin"\s*\n\s*pass:\s*"?([^"\n]+)"?', cm).group(1)
     cert = os.path.join(H, f"{ca}-ca.pem")  # the CA's root certificate also signs its TLS certificate
-    if not os.path.exists(cert):
-        with open(cert, "wb") as f:
-            f.write(base64.b64decode(kubectl_json("secret", ca)["data"]["ca-certificate"]))
+    if not os.path.exists(cert):  # no script reads a Secret's content into the client (orchestrator rule 2026-11-12): the PUBLIC root comes from the exchange tree
+        sys.exit(f"missing {cert}: put the CA's public root certificate there (this script no longer reads the CA Secret)")
     addr = f"{HOST}:{port}"
 
     def run(args, home, mask=()):

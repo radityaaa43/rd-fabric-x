@@ -256,10 +256,8 @@ def driver(replicas):
 def apply(replicas):
     try:
         kubectl("get", "secret", "ghcr-pull")
-    except subprocess.CalledProcessError:  # the image pull secret lives in namespace dfabi
-        s = json.loads(subprocess.check_output(["kubectl", "-n", "dfabi", "get", "secret", "ghcr-pull", "-o", "json"]))
-        s["metadata"] = {"name": "ghcr-pull", "namespace": NS}
-        kubectl("apply", "-f", "-", stdin=json.dumps(s).encode())
+    except subprocess.CalledProcessError:  # no script copies a Secret's content (orchestrator rule 2026-11-12): its owner creates it
+        sys.exit(f"Secret ghcr-pull is missing in namespace {NS}: its owner creates it (this script no longer copies it from dfabi)")
     docs = [d for pod in PODS for d in institution(pod, replicas)] + driver(replicas)
     print(kubectl("apply", "-f", "-", stdin=yaml.safe_dump_all(docs).encode()).decode(), end="")
 
