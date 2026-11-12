@@ -38,6 +38,7 @@ import (
 //	redeem   {from, type, amount}
 //	precheck {id, kind, from, to, give, get}                 the counterparty leg of a swap/award; OPA decides, no chain action
 //	balance {type} | history {limit} | records {txid} | finality {txid} | report {txid} | usage {type, since}
+//	ledger {txid} | ledgertxs {limit<=200, before?}   read-only views of the party's OWN committer DB (ledger.go); 501 until the store is wired
 var (
 	serving bool
 	party   string
@@ -70,6 +71,7 @@ type request struct {
 	TxID   string `json:"txid,omitempty"`
 	Limit  int    `json:"limit,omitempty"`
 	Since  string `json:"since,omitempty"`
+	Before *int64 `json:"before,omitempty"` // ledgertxs: block number, exclusive
 }
 
 type httpError struct {
@@ -92,6 +94,7 @@ func serve(args []string) {
 	party, serving, peers = args[0], true, c
 	every, err := redeliverInterval(os.Getenv(envRedeliver))
 	must(err, "redelivery interval")
+	initLedger()
 	pending = newRealRedeliverer(party != bi)
 	if every <= 0 {
 		pending.disable()
@@ -271,6 +274,10 @@ func dispatch(req request) (any, error) {
 			pending.note(req.TxID, out)
 		}
 		return map[string]any{"report": out}, nil
+	case "ledger":
+		return ledgerOp(req.TxID)
+	case "ledgertxs":
+		return ledgerTxsOp(req.Limit, req.Before)
 	case "usage":
 		since, err := time.Parse(time.RFC3339, req.Since)
 		if err != nil || req.Type == "" {

@@ -69,7 +69,7 @@ func withLedger(t *testing.T, f *fakeLedger) *[]string {
 	return asked
 }
 
-func call(t *testing.T, body string) (int, string) {
+func postOp(t *testing.T, body string) (int, string) {
 	t.Helper()
 	w := httptest.NewRecorder()
 	handle(w, httptest.NewRequest(http.MethodPost, "/", strings.NewReader(body)))
@@ -79,7 +79,7 @@ func call(t *testing.T, body string) (int, string) {
 func TestLedgerNotConfiguredIs501(t *testing.T) {
 	withLedger(t, nil)
 	for _, b := range []string{`{"op":"ledger","txid":"` + tx1 + `"}`, `{"op":"ledgertxs","limit":5}`} {
-		if code, body := call(t, b); code != 501 || !strings.Contains(body, "ledger op not configured") {
+		if code, body := postOp(t, b); code != 501 || !strings.Contains(body, "ledger op not configured") {
 			t.Fatalf("%s: %d %q", b, code, body)
 		}
 	}
@@ -88,7 +88,7 @@ func TestLedgerNotConfiguredIs501(t *testing.T) {
 func TestLedgerUnknownNamespaceTableIs404NeverEmpty(t *testing.T) {
 	withLedger(t, &fakeLedger{tables: map[string]bool{}})
 	for _, b := range []string{`{"op":"ledger","txid":"` + tx1 + `"}`, `{"op":"ledgertxs","limit":5}`} {
-		if code, body := call(t, b); code != 404 || !strings.Contains(body, "unknown namespace table") {
+		if code, body := postOp(t, b); code != 404 || !strings.Contains(body, "unknown namespace table") {
 			t.Fatalf("%s: %d %q", b, code, body)
 		}
 	}
@@ -102,7 +102,7 @@ func TestLedgerInputValidation(t *testing.T) {
 		`{"op":"ledgertxs"}`, `{"op":"ledgertxs","limit":0}`, `{"op":"ledgertxs","limit":201}`, `{"op":"ledgertxs","limit":-1}`, `{"op":"ledgertxs","limit":5,"before":-3}`,
 	}
 	for _, b := range bad {
-		if code, _ := call(t, b); code != 400 {
+		if code, _ := postOp(t, b); code != 400 {
 			t.Fatalf("%s: want 400, got %d", b, code)
 		}
 	}
@@ -117,7 +117,7 @@ func TestLedgerTxUnknownAndKnown(t *testing.T) {
 		recs: map[string]ledgerTxRecord{tx1: {Block: 12, TxNum: 3, Status: "COMMITTED"}},
 		rows: map[string][]ledgerRowRaw{tx1: {{Key: []byte("\x00tokenreq\\" + tx1[:4] + "\xff"), Version: 7, Value: long}, {Key: []byte("k"), Version: 1, Value: []byte{0xde, 0xad}}}}}
 	withLedger(t, f)
-	code, body := call(t, `{"op":"ledger","txid":"`+tx1+`"}`)
+	code, body := postOp(t, `{"op":"ledger","txid":"`+tx1+`"}`)
 	if code != 200 {
 		t.Fatalf("%d %s", code, body)
 	}
@@ -148,7 +148,7 @@ func TestLedgerTxUnknownAndKnown(t *testing.T) {
 	if got.Rows[1].Key != "k" || got.Rows[1].ValueHex != "dead" || got.Rows[1].Truncated {
 		t.Fatalf("row1 %+v", got.Rows[1])
 	}
-	_, body = call(t, `{"op":"ledger","txid":"`+strings.Repeat("0", 64)+`"}`)
+	_, body = postOp(t, `{"op":"ledger","txid":"`+strings.Repeat("0", 64)+`"}`)
 	if !strings.Contains(body, `"found":false`) || !strings.Contains(body, `"status":null`) || !strings.Contains(body, `"rows":[]`) {
 		t.Fatalf("unknown tx: %s", body)
 	}
@@ -165,7 +165,7 @@ func TestLedgerTxsPagingEndsOnBlockBoundariesAndCursorIsExclusive(t *testing.T) 
 		NextBefore *int64          `json:"nextBefore"`
 	}
 	get := func(body string) page {
-		code, out := call(t, body)
+		code, out := postOp(t, body)
 		if code != 200 {
 			t.Fatalf("%s: %d %s", body, code, out)
 		}
