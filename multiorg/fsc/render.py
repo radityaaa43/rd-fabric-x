@@ -144,19 +144,35 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
     docs.append({"apiVersion": "v1", "kind": "PersistentVolumeClaim", "metadata": meta(f"rdbi-{pod}-state"),
                  "spec": {"accessModes": ["ReadWriteOnce"], "storageClassName": storage_class, "resources": {"requests": {"storage": "2Gi"}}}})
     own_g, own_p = sorted(p2p_ports[x][0] for x in nodes), sorted(p2p_ports[x][1] for x in nodes)
-    all_p = sorted(v[1] for v in p2p_ports.values())
     arma_ips = arma.IPS[cluster]
     peers_from = ([{"namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}}}] if cluster == "cluster1" else []) + [{"ipBlock": {"cidr": arma.PEER_EGRESS[cluster]}}, {"ipBlock": {"cidr": arma.CLB_HEALTH}}]
+    # R17 egress form (multiorg/test_netpol_form.py): same-cluster peers by namespace+pod selector (an ipBlock does not match in-cluster pod endpoints on this CNI: the Service address
+    # is DNATed to the pod), ipBlock /32 only for the peers of the OTHER cluster, DNS by exact name + CoreDNS selector.
+    sel = lambda nm: {"matchLabels": {"app.kubernetes.io/name": nm}}
+    tcp = lambda *ps: [{"protocol": "TCP", "port": q} for q in ps]
+    cluster_of = lambda q: "cluster2" if q == "bank-c" else "cluster1"
+    to_ns = lambda q, nm: {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": f"rd-fabricx-{q}"}}, "podSelector": sel(nm)}
+    egress = [{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
+               "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
+              {"to": [{"podSelector": sel("committer-sidecar")}], "ports": tcp(5130)}, {"to": [{"podSelector": sel("committer-query")}], "ports": tcp(5140)},
+              {"to": [{"podSelector": sel(f"orderer-router-{n}")}], "ports": tcp(arma.PORT_PLAN["router"])}, {"to": [{"podSelector": sel(f"orderer-assembler-{n}")}], "ports": tcp(arma.PORT_PLAN["assembler"])}]
+    for q, m in PARTY_N.items():
+        if m == n:
+            continue
+        peer_p2p = tcp(*sorted(p2p_ports[x][1] for x in all_nodes[m]))
+        if cluster_of(q) == cluster:
+            egress += [{"to": [to_ns(q, f"rdbi-{enroll_fsc.NODES[q][0]}")], "ports": peer_p2p},
+                       {"to": [to_ns(q, f"orderer-router-{m}")], "ports": tcp(arma.PORT_PLAN["router"])}, {"to": [to_ns(q, f"orderer-assembler-{m}")], "ports": tcp(arma.PORT_PLAN["assembler"])}]
+        else:
+            egress += [{"to": [{"ipBlock": {"cidr": f"{p2p_ips[cluster][m]}/32"}}], "ports": peer_p2p},
+                       {"to": [{"ipBlock": {"cidr": f"{arma_ips[m]}/32"}}], "ports": tcp(arma.PORT_PLAN["assembler"], arma.PORT_PLAN["router"])}]
     docs.append({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta("rdbi-traffic"),
                  "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": f"rdbi-{pod}"}}, "policyTypes": ["Ingress", "Egress"],
                           "ingress": [{"from": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": f"fx-gw-{n}"}}}], "ports": [{"protocol": "TCP", "port": v} for v in own_g]},
                                       # P2P from the other orgs: the shape proven on the arma CLBs (lb-1..4, 2026-11-12): the org namespaces of this cluster, the OTHER cluster's egress /32
                                       # and the CLB health check source (backend-type eni); never any source. The CLB ACL stays the first filter.
                                       {"from": peers_from, "ports": [{"protocol": "TCP", "port": v} for v in own_p]}],
-                          "egress": [{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}}], "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
-                                     {"to": [{"podSelector": {}}]},
-                                     {"to": [{"ipBlock": {"cidr": f"{ip}/32"}} for ip in sorted({*p2p_ips[cluster].values(), *arma_ips.values()})],
-                                      "ports": [{"protocol": "TCP", "port": v} for v in sorted({8011, 8013, *all_p})]}]}})
+                          "egress": egress}})
     aliases = [{"ip": p2p_ips[cluster][m], "hostnames": list(ns_)} for m, ns_ in sorted(all_nodes.items()) if m != n]
     for m in (1, 2, 3, 4):   # the node dials the orderers by the genesis names (UNVERIFIED, see RUNBOOK-S13): router and assembler of every party
         aliases.append({"ip": arma_ips[m], "hostnames": [f"{r}-{m}.arma.rd" for r in ("assembler", "router")]})
