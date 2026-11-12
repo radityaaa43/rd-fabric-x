@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Print the objects of an in-namespace Job that looks at / backs up / removes the sqlite of one org's FSC pod with the STOCK sqlite3 CLI (image fsc-sqlite-ci, no code of ours). stdout only, nothing applied.
 
-usage: state_render.py <mode> <party> --image repo@sha256:HEX --name GEN        modes: count | b-prime | restore | remove-backup
+usage: state_render.py <mode> <party> --image repo@sha256:HEX --name GEN [--node NODE]        modes: count | b-prime | restore | remove-backup
 The FSC pod keeps one sqlite per node on its state PVC `rdbi-<pod>-state`: `<PVC>/<node>/default.sqlite` (core.yaml persistences.default). The pod must be SCALED TO 0 first (clean close, no second writer, no WAL tearing).
   count          (A)  PVC mounted READ-ONLY. For each node: copy default.sqlite* to a scratch dir, checkpoint the COPY, `sqlite3 -readonly` the copy: prints `<node> <table> <rows>` and the file names. Never a value.
   b-prime        (B') per node, `set -eu`: counts of the original (via a copy) -> backup default.sqlite + -wal + -shm as *.bak-<GEN> (same PVC) with sha256 backup = original -> restore test (copy the backup to
@@ -9,7 +9,8 @@ The FSC pod keeps one sqlite per node on its state PVC `rdbi-<pod>-state`: `<PVC
   restore        rollback: copy the *.bak-<GEN> files back over default.sqlite* and verify sha256.
   remove-backup  the separate later step: remove ONLY the *.bak-<GEN> files (prints the file names before and after, never a value).
                  The FSC pod keeps running: the state PVC is ReadWriteOnce and attached to its node, so this Job (only this mode) carries a required podAffinity to the FSC pod (same node);
-                 without it the scheduler may pick another node and the Job dies with Multi-Attach (live 2026-11-12, bi).
+                 without it the scheduler may pick another node and the Job dies with Multi-Attach (live 2026-11-12, bi). The scheduler also ignored it once (bank-b), so
+                 remove-backup ALSO sets spec.nodeName = --node (required): the FSC pod's node, read fresh by the caller right before the apply.
 Pod: label rd/egress-locked=true, NetworkPolicy with policyTypes Ingress+Egress and NO rules (all traffic denied), no Secret volume, no ServiceAccount token, uid 10001, deadline 120 s, ttl 900 s.
 Scripts read $S (state, default /state) and $W (scratch, default /work) so they can be run on fixture directories in tests."""
 import argparse, re, sys
@@ -91,7 +92,7 @@ done
 '''
 
 
-def render(mode, party, image, gen):
+def render(mode, party, image, gen, node=None):
     if party not in PARTY:
         die(f"party {party!r} must be one of {', '.join(PARTY)}")
     if mode not in MODES:
@@ -100,6 +101,11 @@ def render(mode, party, image, gen):
         die("--image must be pinned by digest (repo@sha256:<64 hex>)")
     if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?", gen or ""):
         die("--name must be 1-20 chars of [a-z0-9-]")
+    if mode == "remove-backup":
+        if not re.fullmatch(r"[a-z0-9]([a-z0-9.-]*[a-z0-9])?", node or ""):
+            die("remove-backup needs --node: the node of the FSC pod (the current consumer of the RWO state disk), read fresh")
+    elif node is not None:
+        die("--node is only for remove-backup")
     pod, nodes = PARTY[party]
     ns = f"rd-fabricx-{party}"
     app = f"fsc-state-{mode}-{gen}"
@@ -114,6 +120,7 @@ def render(mode, party, image, gen):
                         "serviceAccountName": "s14-signer", "automountServiceAccountToken": False, "restartPolicy": "Never",
                         "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "fsGroup": UID, "seccompProfile": {"type": "RuntimeDefault"}},
                         "imagePullSecrets": [{"name": "ghcr-pull"}],
+                        **({"nodeName": node} if mode == "remove-backup" else {}),
                         **({"affinity": {"podAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [
                             {"labelSelector": {"matchLabels": {"app.kubernetes.io/name": f"rdbi-{pod}"}}, "topologyKey": "kubernetes.io/hostname"}]}}} if mode == "remove-backup" else {}),
                         "containers": [{"name": "state", "image": image, "command": ["sh", "-c", script(mode, nodes, gen)], "securityContext": sec,
@@ -130,8 +137,9 @@ def main():
     ap.add_argument("party")
     ap.add_argument("--image")
     ap.add_argument("--name")
+    ap.add_argument("--node")
     a = ap.parse_args()
-    sys.stdout.write(render(a.mode, a.party, a.image, a.name))
+    sys.stdout.write(render(a.mode, a.party, a.image, a.name, node=a.node))
 
 
 if __name__ == "__main__":
