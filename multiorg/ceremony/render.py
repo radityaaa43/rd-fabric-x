@@ -6,6 +6,7 @@ usage: render.py role <party>
        render.py submit bi --tx FILE --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME      (tx1 submit --wait, BI only)
        render.py readback bi --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME              (`namespace list`, every party: its own committer-tls and query service)
        render.py setuppp bi --image repo@sha256:HEX --name NAME [--namespace rd_dfabi_v2]       (rdbi-driver setup-pp, BI only)
+       render.py dbread <party> --name NAME --mode schema|status|occurrences [--txid HEX64] [--needle HEX] [--namespace rd_dfabi_v2]   (egress-locked read-only psql Job on the org's own committer-db; no exec)
        render.py probe <party> --image repo@sha256:HEX --name NAME --try LABEL=HOST:PORT ... [--allow pod=APP:PORT | --allow dns ...]
 `role`: Role s14-sign + RoleBinding in rd-fabricx-<party>: jobs create+get, pods get, pods/log get, bound to the org's own party-admin ServiceAccount only. TIME-BOXED: created right before the
 org's signing and removed right after its Job completed (both logged in R13). party-admin cannot create a Role, so the operator creates it (R13).
@@ -23,7 +24,7 @@ policy, lock label): the issuer FSC view port :5100 + DNS. The issuer node itsel
 `probe`: a Job that mounts NO Secret, carries the label and tries TCP connects (bash /dev/tcp, 4 s each), printing `LABEL HOST:PORT OPEN|CLOSED`; its own policy allows only the --allow entries
 (pod=<app.kubernetes.io/name>:<port> in the same namespace, ip=<ipv4>/32:<port> one external host, nspod=<rd-fabricx-ns>/<app>:<port> a pod of another rd-fabricx namespace, dns = kube-system :53). It proves the policy binds before any key-holding Job relies on it.
 """
-import argparse, re, sys
+import argparse, hashlib, json, re, sys
 import yaml
 
 PARTY_N = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
@@ -246,9 +247,113 @@ def render_setuppp(party, image, name, namespace="rd_dfabi_v2"):
     return yaml.safe_dump_all([np, job], sort_keys=False)
 
 
+PG_IMAGE = "docker.io/library/postgres@sha256:7958605b474b3d264a969cb3a123d6aa00ad1e1fe9da8a69984dabb704d93317"   # the digest committer-db already runs (multiorg/committer/render.py PG_IMAGE)
+# `dbread` (no exec into key holders): the three statements it can ever run. {ns} = ns_<namespace>; txid / needle are validated lowercase hex embedded at RENDER time (no psql variables: -c does not interpolate them).
+# UNVERIFIED until a `schema` run: the column names (tx_id, status, key, value); the first live use is `schema`, and a changed statement changes dbread_template_sha256 (the GO text quotes it).
+DBREAD_SQL = {
+    "schema": "select table_name || '.' || column_name || ':' || data_type from information_schema.columns where table_name in ('tx_status', '{ns}') order by table_name, ordinal_position",
+    "status": "select status from tx_status where tx_id = decode('{txid}', 'hex')",
+    "occurrences": "select count(*) from {ns} where position(decode('{txid}', 'hex') in key) > 0 and position(decode('{needle}', 'hex') in value) > 0",
+}
+DBREAD_FLAGS = ["-X", "-q", "-A", "-t", "-v", "ON_ERROR_STOP=1", "-c"]
+DBREAD_ENV = ["PGHOST", "PGPORT", "PGDATABASE", "PGUSER", "PGSSLMODE", "PGCONNECT_TIMEOUT", "PGPASSWORD"]
+DBREAD_WRITE = re.compile(r"\b(insert|update|delete|drop|create|alter|grant|revoke|truncate|copy|call|vacuum|set|reset|lock|do)\b|;|pg_read_file|lo_import|dblink", re.I)
+
+
+def dbread_sql(mode, namespace, txid=None, needle=None):
+    if mode not in DBREAD_SQL:
+        die(f"mode must be one of {', '.join(DBREAD_SQL)}")
+    if not re.fullmatch(r"[a-z][a-z0-9_]{0,40}", namespace or ""):
+        die("--namespace must match [a-z][a-z0-9_]{0,40}")
+    if mode != "schema" and not re.fullmatch(r"[0-9a-f]{64}", txid or ""):
+        die("--txid must be 64 lowercase hex characters")
+    if mode == "occurrences" and not re.fullmatch(r"([0-9a-f]{2}){1,8}", needle or ""):
+        die("--needle must be 1-8 bytes of lowercase hex")
+    return DBREAD_SQL[mode].format(ns="ns_" + namespace, txid=txid, needle=needle)
+
+
+def dbread_template_sha256(namespace):
+    """sha256 over the three statement TEMPLATES for this namespace (placeholders kept): the 'fixed script' the GO text quotes."""
+    t = {m: q.format(ns="ns_" + namespace, txid="{txid}", needle="{needle}") for m, q in DBREAD_SQL.items()}
+    return hashlib.sha256(json.dumps(t, sort_keys=True).encode()).hexdigest()
+
+
+def render_dbread(party, name, mode, txid=None, needle=None, namespace="rd_dfabi_v2"):
+    n, ns = check(party)
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,28}[a-z0-9])?", name or ""):
+        die("--name must be 1-30 chars of [a-z0-9-]")
+    sql = dbread_sql(mode, namespace, txid, needle)
+    app = f"dbread-{name}"
+    pl = {**LABELS, "app.kubernetes.io/name": app, LOCK: "true"}
+    meta = lambda nm, extra=None: {"name": nm, "namespace": ns, "labels": {**LABELS, **(extra or {})}}
+    np = {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(f"{app}-egress"),
+          "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": app}}, "policyTypes": ["Ingress", "Egress"], "egress": [egress_rule("dns"), egress_rule("pod=committer-db:5432")]}}
+    env = [{"name": "PGHOST", "value": "committer-db"}, {"name": "PGPORT", "value": "5432"}, {"name": "PGDATABASE", "value": "committer"}, {"name": "PGUSER", "value": "committer"},
+           {"name": "PGSSLMODE", "value": "require"}, {"name": "PGCONNECT_TIMEOUT", "value": "5"},
+           {"name": "PGPASSWORD", "valueFrom": {"secretKeyRef": {"name": "committer-db-credentials", "key": "password"}}}]
+    sec = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}, "runAsNonRoot": True, "runAsUser": UID}
+    job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta(app, {"app.kubernetes.io/name": app}),
+           "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 120, "ttlSecondsAfterFinished": 900,
+                    "template": {"metadata": {"labels": pl}, "spec": {
+                        "automountServiceAccountToken": False, "restartPolicy": "Never",
+                        "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "fsGroup": UID, "seccompProfile": {"type": "RuntimeDefault"}},
+                        "containers": [{"name": "dbread", "image": PG_IMAGE, "command": ["psql"], "args": [*DBREAD_FLAGS, sql], "env": env, "securityContext": sec,
+                                        "resources": {"requests": {"cpu": "20m", "memory": "32Mi", "ephemeral-storage": "8Mi"}, "limits": {"cpu": "200m", "memory": "64Mi", "ephemeral-storage": "16Mi"}}}]}}}}
+    check_locked([job])
+    docs = [np, job]
+    problems = audit_dbread(docs, mode)
+    if problems:
+        die("dbread audit: " + "; ".join(problems))
+    return yaml.safe_dump_all(docs, sort_keys=False)
+
+
+def audit_dbread(docs, mode):
+    """Problems (empty = fine) for a dbread render: a keyless-to-the-API, egress-locked, SELECT-only reader that can print only a status string, integers or column names."""
+    p = []
+    nps, jobs = [d for d in docs if d["kind"] == "NetworkPolicy"], [d for d in docs if d["kind"] == "Job"]
+    if len(nps) != 1 or len(jobs) != 1 or len(docs) != 2:
+        return ["not exactly one NetworkPolicy and one Job"]
+    np, job = nps[0], jobs[0]
+    t = job["spec"]["template"]; ps = t["spec"]; cs = ps.get("containers", [])
+    if len(cs) != 1:
+        return ["not exactly one container"]
+    c = cs[0]; labels = t["metadata"]["labels"]
+    if labels.get(LOCK) != "true":
+        p.append("rd/egress-locked label missing")
+    if np["spec"]["podSelector"].get("matchLabels") != {"app.kubernetes.io/name": labels.get("app.kubernetes.io/name")}:
+        p.append("NetworkPolicy does not select the Job pod")
+    if np["spec"].get("policyTypes") != ["Ingress", "Egress"] or "ingress" in np["spec"] or np["spec"].get("egress") != [egress_rule("dns"), egress_rule("pod=committer-db:5432")]:
+        p.append("egress is not exactly kube-dns + committer-db:5432 (or ingress rules present)")
+    if c.get("image") != PG_IMAGE:
+        p.append("image is not the pinned postgres digest")
+    if c.get("command") != ["psql"]:
+        p.append("command is not exactly [psql] (no shell)")
+    args = c.get("args", [])
+    sql = args[-1] if args else ""
+    if args[:-1] != DBREAD_FLAGS:
+        p.append("psql flags differ")
+    if DBREAD_WRITE.search(sql) or not sql.lstrip().lower().startswith("select "):
+        p.append("SQL is not a single read-only SELECT")
+    pat = re.escape(DBREAD_SQL.get(mode, "")).replace(re.escape("{ns}"), r"ns_[a-z][a-z0-9_]{0,40}").replace(re.escape("{txid}"), r"[0-9a-f]{64}").replace(re.escape("{needle}"), r"([0-9a-f]{2}){1,8}")
+    if not re.fullmatch(pat, sql):
+        p.append("SQL is not the fixed statement of this mode")
+    env = c.get("env", [])
+    if [e["name"] for e in env] != DBREAD_ENV:
+        p.append("env names differ")
+    refs = [(e["name"], e["valueFrom"]) for e in env if "valueFrom" in e]
+    if refs != [("PGPASSWORD", {"secretKeyRef": {"name": "committer-db-credentials", "key": "password"}})]:
+        p.append("secret references other than PGPASSWORD <- committer-db-credentials/password")
+    if "volumes" in ps or "volumeMounts" in c or "envFrom" in c or ps.get("automountServiceAccountToken") is not False or ps.get("serviceAccountName"):
+        p.append("volume / envFrom / service account token present")
+    sp = job["spec"]
+    if (sp.get("backoffLimit"), sp.get("ttlSecondsAfterFinished"), ps.get("restartPolicy")) != (0, 900, "Never") or not 0 < sp.get("activeDeadlineSeconds", 0) <= 120:
+        p.append("Job lifetime fields differ")
+    return p
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("what", choices=["role", "job", "probe", "submit", "readback", "setuppp"])
+    ap.add_argument("what", choices=["role", "job", "probe", "submit", "readback", "setuppp", "dbread"])
     ap.add_argument("party")
     for o in ("tx", "cacert", "image", "tx-name", "name"):
         ap.add_argument(f"--{o}")
@@ -256,6 +361,9 @@ def main():
     ap.add_argument("--namespace", default="rd_dfabi_v2")
     ap.add_argument("--try", dest="tries", action="append", default=[])
     ap.add_argument("--allow", action="append", default=[])
+    ap.add_argument("--mode")
+    ap.add_argument("--txid")
+    ap.add_argument("--needle")
     a = ap.parse_args()
     if a.what == "role":
         sys.stdout.write(render_role(a.party))
@@ -269,6 +377,10 @@ def main():
             if not getattr(a, o):
                 die(f"--{o} is required")
         sys.stdout.write(render_setuppp(a.party, a.image, a.name, a.namespace))
+    elif a.what == "dbread":
+        if not a.name or not a.mode:
+            die("--name and --mode are required")
+        sys.stdout.write(render_dbread(a.party, a.name, a.mode, a.txid, a.needle, a.namespace))
     elif a.what == "probe":
         sys.stdout.write(render_probe(a.party, a.image, a.name, a.tries, a.allow))
     else:

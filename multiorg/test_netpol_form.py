@@ -65,6 +65,7 @@ def renders():
     out += run(cer, "setuppp", "bi", "--image", IMG, "--name", "p1")
     out += run(cer, "probe", "bi", "--image", IMG, "--name", "x1", "--try", "a=1.1.1.1:443", "--allow", "pod=orderer-router-1:8013", "--allow", "dns", "--allow", "ip=1.1.1.1/32:443",
                "--allow", "nspod=rd-fabricx-bank-a/rdbi-bank2:5104")
+    out += run(cer, "dbread", "bank-a", "--name", "d1", "--mode", "status", "--txid", "ab" * 32)
     for mode in ("run", "dry-run", "remove-prev", "restore-prev", "restore-prev-dry-run"):
         out += run(fsc, "job", "bank-c", "bank4", "--image", IMG, "--name", "g1", "--api-ips", "172.28.18.47,172.28.47.223", "--mode", mode)
     return [d for d in out if d["kind"] == "NetworkPolicy"]
