@@ -4,6 +4,8 @@
 // ServiceAccount (Role: secrets get+patch on ONE Secret): it mounts the CURRENT cert+key read-only, runs `fabric-ca-client reenroll` authenticated by that identity only (no CA admin
 // password, no FABRIC_CA_CLIENT_URL credentials), checks the result, and merge-patches the SAME Secret: new cert/key, the old pair kept as <key>.prev-<gen>.
 // The output carries exit information, the Secret resourceVersion before/after and the NEW PUBLIC cert only; a private key never reaches stdout.
+//
+// Second mode `--rotate-admin` (R4, rotate.go): rotate the CA admin password of the org's own fca-org<N> and the Secret fca-org<N>-admin together.
 package main
 
 import (
@@ -32,7 +34,7 @@ var safe = regexp.MustCompile(`^[A-Za-z0-9._-]+$`)
 
 type cfg struct {
 	node, caURL, hosts, names, secret, in, work, keys, gen, api, ns, tokenFile, apiCA, caBin string
-	dryRun, removePrev, restorePrev                                                          bool
+	dryRun, removePrev, restorePrev, rotateAdmin                                             bool
 }
 
 func main() {
@@ -53,6 +55,7 @@ func run(args []string, out io.Writer) error {
 	fs.BoolVar(&c.dryRun, "dry-run", false, "")
 	fs.BoolVar(&c.removePrev, "remove-prev", false, "")
 	fs.BoolVar(&c.restorePrev, "restore-prev", false, "")
+	fs.BoolVar(&c.rotateAdmin, "rotate-admin", false, "")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -74,6 +77,9 @@ func run(args []string, out io.Writer) error {
 	}
 	if c.caBin == "" {
 		c.caBin = "fabric-ca-client"
+	}
+	if c.rotateAdmin { // R4: the CA admin password, see rotate.go (no node/keys/hosts here)
+		return rotateAdmin(&c, out)
 	}
 	keys := strings.Split(c.keys, ",")
 	if len(keys) != 2 || !safe.MatchString(c.node) || !safe.MatchString(c.secret) || !safe.MatchString(c.gen) || !safe.MatchString(keys[0]) || !safe.MatchString(keys[1]) || c.hosts == "" || c.caURL == "" {

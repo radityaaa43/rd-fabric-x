@@ -42,6 +42,71 @@ class Role(unittest.TestCase):
             rr.render_role("bank-d")
 
 
+class CaRotate(unittest.TestCase):
+    """R4: the CA admin password rotation Job. Objects: SA fca-rotate + Role (ONE Secret fca-org<N>-admin, get+patch) + RoleBinding (time-boxed by the operator, R13), and NetworkPolicy + Job."""
+    N = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
+
+    def role(self, p):
+        return docs(rr.render_ca_role(p))
+
+    def job(self, p="bank-b", **kw):
+        a = dict(image=IMG, name="r1", api_ips=API)
+        a.update(kw)
+        return docs(rr.render_ca_job(p, **a))
+
+    def test_role_is_one_admin_secret_get_patch_only_and_its_own_sa(self):
+        for p, n in self.N.items():
+            ds = self.role(p)
+            self.assertEqual(by(ds, "Role")["rules"], [{"apiGroups": [""], "resources": ["secrets"], "resourceNames": [f"fca-org{n}-admin"], "verbs": ["get", "patch"]}])
+            self.assertEqual(by(ds, "ServiceAccount")["metadata"]["name"], "fca-rotate")
+            self.assertEqual(by(ds, "RoleBinding")["subjects"], [{"kind": "ServiceAccount", "name": "fca-rotate", "namespace": f"rd-fabricx-{p}"}])
+            self.assertIs(by(ds, "ServiceAccount")["automountServiceAccountToken"], False)
+
+    def test_objects_command_and_no_secret_volume(self):
+        for p, n in self.N.items():
+            ds = self.job(p)
+            self.assertEqual(sorted((d["kind"], d["metadata"]["name"]) for d in ds), [("Job", "fca-rotate-admin-r1"), ("NetworkPolicy", "fca-rotate-admin-r1-egress")])
+            spec = by(ds, "Job")["spec"]["template"]["spec"]
+            c = spec["containers"][0]
+            self.assertEqual(c["command"], ["fsc-reenroll", "--rotate-admin", "--ca-url", f"http://fca-org{n}.rd-fabricx-{p}.svc.cluster.local:7054", "--secret", f"fca-org{n}-admin", "--work", "/work"])
+            self.assertEqual([v["name"] for v in spec["volumes"]], ["work"])
+            self.assertEqual(spec["volumes"][0], {"name": "work", "emptyDir": {"medium": "Memory"}})
+            self.assertNotIn("PersistentVolumeClaim", str(spec["volumes"]))
+            self.assertNotIn("secret", str(spec["volumes"]).lower())
+            self.assertEqual(spec["serviceAccountName"], "fca-rotate")
+            self.assertIs(spec["automountServiceAccountToken"], True)   # the helper PATCHes its one Secret with this token
+            self.assertEqual(by(ds, "Job")["spec"]["template"]["metadata"]["labels"]["rd/egress-locked"], "true")
+            self.assertEqual((by(ds, "Job")["spec"]["backoffLimit"], by(ds, "Job")["spec"]["activeDeadlineSeconds"], by(ds, "Job")["spec"]["ttlSecondsAfterFinished"]), (0, 180, 900))
+
+    def test_nothing_secret_in_the_command_or_env(self):
+        txt = rr.render_ca_job("bank-a", IMG, "r1", API)
+        for bad in ("password", "FABRIC_CA_CLIENT_URL", "admin:", "--secret-value", "env:"):
+            self.assertNotIn(bad, txt.replace("--secret", "").replace("fca-org2-admin", ""))
+
+    def test_egress_is_own_ca_api_endpoints_and_dns_only(self):
+        for p, n in self.N.items():
+            eg = by(self.job(p), "NetworkPolicy")["spec"]["egress"]
+            self.assertEqual(eg[0], {"to": [{"podSelector": {"matchLabels": {"app.kubernetes.io/name": f"fca-org{n}"}}}], "ports": [{"port": 7054, "protocol": "TCP"}]})
+            self.assertEqual([e["to"][0]["ipBlock"]["cidr"] for e in eg[1:3]], ["172.24.11.240/32", "172.24.40.81/32"])
+            self.assertEqual(eg[3]["ports"], [{"port": 53, "protocol": "UDP"}, {"port": 53, "protocol": "TCP"}])
+            self.assertEqual(len(eg), 4)
+
+    def test_checked_inputs(self):
+        for kw in (dict(image="x:latest"), dict(name="BAD"), dict(api_ips=""), dict(api_ips="1.2.3.4,1.2.3.4")):
+            with self.assertRaises(SystemExit, msg=str(kw)):
+                rr.render_ca_job("bank-b", **{**dict(image=IMG, name="r1", api_ips=API), **kw})
+        with self.assertRaises(SystemExit):
+            rr.render_ca_role("bank-d")
+
+    def test_cli(self):
+        r = subprocess.run([sys.executable, os.path.join(HERE, "reenroll_render.py"), "ca-job", "bank-b", "--image", IMG, "--name", "r1", "--api-ips", API], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("fca-rotate-admin-r1", r.stdout)
+        r = subprocess.run([sys.executable, os.path.join(HERE, "reenroll_render.py"), "ca-role", "bank-b"], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+        self.assertIn("fca-org3-admin", r.stdout)
+
+
 class Job(unittest.TestCase):
     def job(self, party="bank-b", node=None, **kw):
         a = dict(image=IMG, name="g1", api_ips=API)
