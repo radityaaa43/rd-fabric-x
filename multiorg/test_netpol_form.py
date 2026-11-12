@@ -135,6 +135,30 @@ class Form(unittest.TestCase):
             for svc in (d for d in docs if d["kind"] == "Service" and d["spec"].get("selector")):
                 self.assertNotIn("rd/egress-locked", svc["spec"]["selector"])
 
+    # Pods that mount a Secret and are still selected by the namespace baseline allow-dns-egress (egress [{}], open). R17 closes FSC and gateways (label); these stay OPEN and are recorded
+    # here as a known gap (reported to lead 2026-11-12). The test fails when a NEW unlabelled Secret-mounting pod appears, and when a listed one gets fixed without being removed from the list.
+    KNOWN_OPEN_SECRET_PODS = {"committer-coordinator", "committer-db", "committer-query", "committer-sidecar", "committer-vc", "committer-verifier"}
+
+    def test_no_secret_mounting_pod_is_selected_by_the_open_baseline_egress_policy_except_the_known_list(self):
+        base = [d for d in yaml.safe_load_all(open(os.path.join(os.path.dirname(ROOT), "namespaces", "templates", "networkpolicies.yaml")).read().replace("${NS}", "ns"))
+                if d and d["metadata"]["name"] == "allow-dns-egress"][0]["spec"]
+        self.assertEqual(base["egress"], [{}])   # the premise: it allows ALL egress
+
+        def selected(labels):   # the baseline selector is a single DoesNotExist expression
+            return all(labels.get(e["key"]) is None for e in base["podSelector"]["matchExpressions"] if e["operator"] == "DoesNotExist")
+
+        def mounts_secret(tpl):
+            return any("secret" in v or any("secret" in x for x in v.get("projected", {}).get("sources", [])) for v in tpl["spec"].get("volumes", []))
+
+        def open_pods(docs):
+            return {d["metadata"]["name"] for d in docs if d["kind"] in ("Deployment", "StatefulSet", "Job") and mounts_secret(d["spec"]["template"]) and selected(d["spec"]["template"]["metadata"]["labels"])}
+        for docs in pod_render_sets():
+            self.assertEqual(open_pods(docs), set(), "FSC and gateway pods must not be open")
+        ct = load("committer/test_render.py", "committer_test_render")
+        t = ct.Base("setUp")
+        for p in ct.PARTIES:
+            self.assertEqual(open_pods(t.docs(p)), self.KNOWN_OPEN_SECRET_PODS, p)
+
     def test_the_checker_catches_the_old_forms(self):
         for bad in ({"podSelector": {}}, {"namespaceSelector": {}}, {"namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}}, "podSelector": {"matchLabels": {"a": "b"}}},
                     {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "x"}}}, {"ipBlock": {"cidr": "10.0.0.0/24"}}, {"ipBlock": {"cidr": "0.0.0.0/0"}},
