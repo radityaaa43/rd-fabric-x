@@ -204,13 +204,14 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
                               "ports": [{"name": "fxapi", "port": 8443, "targetPort": 8443, "protocol": "TCP"}]}})
     np = {"podSelector": {"matchLabels": pl}, "policyTypes": ["Ingress"], "ingress": [{"ports": [{"protocol": "TCP", "port": 8443}]}]}
     if restrict_egress:
-        # R17 egress form (multiorg/test_netpol_form.py). NOT covered, deliberately: OPA pulls its bundles from http://bundle-server.rd-zeto-<party>.svc (port 80 -> pod 8080), but the pod
-        # labels of that bundle-server live in the zeto repo, not here, so no rule is invented: with this flag ON the bundle pull is blocked until the rule is added (hence opt-in).
+        # R17 egress form (multiorg/test_netpol_form.py). OPA pulls its bundles from http://bundle-server.rd-zeto-<party>.svc (Service port 80 -> pod 8080). The zeto repo owns that Service;
+        # its selector and pod label (app=bundle-server) were READ live on 2026-11-12 in rd-zeto-{bi,bank-a,bank-b,bank-c}: the rule below follows them (same party's namespace only).
         sel = lambda nm: {"matchLabels": {"app.kubernetes.io/name": nm}}
         tcp = lambda p: [{"protocol": "TCP", "port": p}]
         egress = [{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
                    "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
-                  {"to": [{"podSelector": sel(f"rdbi-{POD[party]}")}], "ports": tcp(grpc_port)}]   # fxapi -> the party node's view gRPC (Service <node>:<port>, same namespace)
+                  {"to": [{"podSelector": sel(f"rdbi-{POD[party]}")}], "ports": tcp(grpc_port)},   # fxapi -> the party node's view gRPC (Service <node>:<port>, same namespace)
+                  {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": f"rd-zeto-{party}"}}, "podSelector": {"matchLabels": {"app": "bundle-server"}}}], "ports": tcp(8080)}]   # OPA -> the SAME party's bundle-server
         for m in sorted(peers):   # the driver dials https://fx-gw-<M>:8443/ (ExternalName for the same cluster, hostAliases for the other)
             if m in same:
                 egress.append({"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": f"rd-fabricx-{same[m]}"}}, "podSelector": sel(f"fx-gw-{m}")}], "ports": tcp(8443)})
@@ -234,7 +235,7 @@ def main():
         ap.add_argument(f"--{o}")
     ap.add_argument("--lb-range", action="append", default=[])
     ap.add_argument("--public-params")
-    ap.add_argument("--restrict-egress", action="store_true", help="add the R17 egress rules (default: Ingress-only; the OPA bundle-server rule is not derivable here)")
+    ap.add_argument("--restrict-egress", action="store_true", help="add the R17 egress rules (DNS, own node view, same-party OPA bundle-server, peer gateways; default: Ingress-only)")
     a = ap.parse_args()
     for o in ("templates", "image", "envoy_image", "opa_image", "opa_config", "gw_cert", "gw_ips", "tls_exchange"):
         if not getattr(a, o):
