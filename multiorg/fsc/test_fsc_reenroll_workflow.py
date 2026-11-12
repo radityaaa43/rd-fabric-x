@@ -26,7 +26,7 @@ class ReenrollImage(unittest.TestCase):
         wf = load()
         self.assertEqual(sorted(wf[True]), ["workflow_dispatch"])
         self.assertEqual(wf["permissions"], {"contents": "read"})
-        self.assertEqual(wf["jobs"]["image"]["permissions"], {"contents": "read", "packages": "write"})
+        self.assertEqual(wf["jobs"]["image"]["permissions"], {"contents": "read", "packages": "write", "id-token": "write", "attestations": "write"})   # the signed attestation step runs now that the repository is public
 
     def test_every_run_step_is_bash_with_pipefail(self):
         wf = load()
