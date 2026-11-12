@@ -21,3 +21,5 @@ Sources: final-design/fabricx/PLAN.md S1 (cluster-2 sub-step: "create ns `rd-fab
 `bank-c` is refused without `--cluster 2`, and `--cluster 2` accepts only `bank-c`. Cluster-1 output is unchanged. Apply happens only in a window opened by `lead`.
 Egress: `allow-dns-egress` selects every pod WITHOUT the label `rd/egress-locked` and allows egress to anything (L0, as PLAN S1); S11/S13 tighten it. Pods that carry the label (the S14 Jobs that mount key Secrets) get only the egress of their own NetworkPolicy: K8s policies are additive, so without the exclusion their deny-all policy bound nothing (R16).
 `secrets` has no `get` by design: use `kubectl create` / `replace`; `kubectl apply` of a Secret fails.
+
+RBAC: the party-admin Role has NO pods/exec, pods/attach or pods/portforward (a port-forward bypasses NetworkPolicy and reaches key holders; removed 2026-11-12, test in test_render.py). Anything that needs a port-forward (CA custody tools, p2p_san) uses the operator kubeconfig, per use.

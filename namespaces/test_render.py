@@ -46,13 +46,12 @@ def check(docs, party, cluster=None):
     assert rb["subjects"] == [{"kind": "ServiceAccount", "name": SA, "namespace": ns}], rb["subjects"]
     for rule in by["Role"][SA]["rules"]:
         assert "*" not in rule["verbs"] and "*" not in rule["resources"], rule
-        assert "pods/exec" not in rule["resources"], rule
+        for bad in ("pods/exec", "pods/attach", "pods/portforward"):   # found live 2026-11-12: port-forward bypasses NetworkPolicy and reaches key holders; exec/attach are shells in them
+            assert bad not in rule["resources"], (bad, rule)
         if "secrets" in rule["resources"]:
             assert rule["resources"] == ["secrets"] and set(rule["verbs"]) == {"create", "update", "patch"}, rule
-    pf = [r for r in by["Role"][SA]["rules"] if "pods/portforward" in r["resources"]]
-    assert len(pf) == 1 and pf[0]["verbs"] == ["create"], "pods/portforward create only (S9: reach the own CA)"
     granted = {r for rule in by["Role"][SA]["rules"] for r in rule["resources"]}
-    need = {"pods/portforward", "deployments", "statefulsets", "services", "configmaps", "persistentvolumeclaims",
+    need = {"deployments", "statefulsets", "services", "configmaps", "persistentvolumeclaims",
             "networkpolicies", "pods", "pods/log", "secrets"}
     assert need <= granted, f"Role misses {need - granted}"
 

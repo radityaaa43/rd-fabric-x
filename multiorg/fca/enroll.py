@@ -157,7 +157,7 @@ def init(party, ns, kubeconfig, work):
 
 
 def enroll(party, ns, kubeconfig, ca_url, work, out, extra_sans=(), generation="", replace_secrets=None):
-    """needs `kubectl --kubeconfig K -n NS port-forward svc/fca-org<N> 7054` running (party-admin Role: pods/portforward).
+    """needs `kubectl --kubeconfig K -n NS port-forward svc/fca-org<N> 7054` running (OPERATOR kubeconfig: the party-admin Role has no pods/portforward since 2026-11-12).
     Credentials travel only in the fabric-ca-client environment (FABRIC_CA_CLIENT_URL), never on a command line.
     [unverified live] that the client reads FABRIC_CA_CLIENT_URL and prints `Password: <x>` on a register without --id.secret
     (Fabric CA users guide): the window-start throwaway enroll settles it."""
