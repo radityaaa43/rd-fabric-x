@@ -74,6 +74,20 @@ jobs:
           subject-name: ghcr.io/${{ github.repository_owner }}/fabricx-tools-ci
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
+      - name: Assert the package is private
+        env:
+          PKG: fabricx-tools-ci
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          # public repo rule: the pushed package must NOT be pullable anonymously. Private = refused (401/403/404); 200, 5xx or no answer fails the job (fail closed).
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          tok="$(curl -sS -m 30 "https://ghcr.io/token?scope=repository:${owner}/${PKG}:pull" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("token", ""))')"
+          code="$(curl -s -m 30 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${tok}" -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' "https://ghcr.io/v2/${owner}/${PKG}/manifests/${DIGEST}")"
+          echo "anonymous manifest request for ${PKG}: HTTP ${code}"
+          case "${code}" in
+            401|403|404) echo "package ${PKG} is private" ;;
+            *) echo "package ${PKG} is PUBLIC or unverifiable (HTTP ${code}): set it to private in the package settings"; exit 1 ;;
+          esac
       - name: Report the digest
         run: |
           { echo "image: ghcr.io/${{ github.repository_owner }}/fabricx-tools-ci@${{ steps.build.outputs.digest }}"; echo "SBOM + BuildKit provenance attached; no signed attestation (private user repository)"; } | tee -a "$GITHUB_STEP_SUMMARY"
