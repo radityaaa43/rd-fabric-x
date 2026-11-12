@@ -7,7 +7,7 @@ usage: render.py role <party>
        render.py readback bi --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME              (`namespace list`, every party: its own committer-tls and query service)
        render.py setuppp bi --image repo@sha256:HEX --name NAME [--namespace rd_dfabi_v2]       (rdbi-driver setup-pp, BI only)
        render.py dbread <party> --name NAME --mode schema|status|occurrences [--txid HEX64] [--needle HEX] [--namespace rd_dfabi_v2]   (egress-locked read-only psql Job on the org's own committer-db; no exec)
-       render.py p2psan <party> --image repo@sha256:HEX --name NAME --cacert PEM --check PARTY/NODE@HOST:PORT ... --allow SPEC ... [--alias IP=host,host ...]   (p2p_san as a keyless in-cluster Job)
+       render.py p2psan <party> --image repo@sha256:HEX --name NAME --ca PARTY=PEM ... --check PARTY/NODE@HOST:PORT ... --allow SPEC ... [--alias IP=host,host ...]   (p2p_san as a keyless in-cluster Job)
        render.py probe <party> --image repo@sha256:HEX --name NAME --try LABEL=HOST:PORT ... [--allow pod=APP:PORT | --allow dns ...]
 `role`: Role s14-sign + RoleBinding in rd-fabricx-<party>: jobs create+get, pods get, pods/log get, bound to the org's own party-admin ServiceAccount only. TIME-BOXED: created right before the
 org's signing and removed right after its Job completed (both logged in R13). party-admin cannot create a Role, so the operator creates it (R13).
@@ -356,7 +356,7 @@ P2PSAN_SCRIPT = r"""set +e
 command -v openssl >/dev/null || { echo "NO_OPENSSL in this image"; exit 3; }
 for t in "$@"; do
   party=${t%%/*}; rest=${t#*/}; node=${rest%%@*}; hp=${rest#*@}; ns=rd-fabricx-$party
-  out=$(timeout 15 openssl s_client -connect "$hp" -servername "$node" -CAfile /ca/ca.pem -verify_hostname "$node" </dev/null 2>/dev/null)
+  out=$(timeout 15 openssl s_client -connect "$hp" -servername "$node" -CAfile /ca/ca-$party.pem -verify_hostname "$node" </dev/null 2>/dev/null)
   if ! printf '%s' "$out" | grep -q 'BEGIN CERTIFICATE'; then echo "$party $node: no certificate presented from $hp"; continue; fi
   cert=$(printf '%s\n' "$out" | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p;/END CERTIFICATE/q')
   names=$(printf '%s\n' "$cert" | openssl x509 -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed -n 's/^ *DNS://p' | tr '\n' ' ')
@@ -387,13 +387,21 @@ def render_p2psan(party, image, name, checks, allow, aliases, cacert):
         if not m or any(int(x) > 255 for x in m.group(1).split(".")):
             die(f"--alias {a!r} must be IPV4=host[,host...]")
         al.append({"ip": m.group(1), "hostnames": m.group(2).split(",")})
-    pem = open(cacert).read()
-    if "PRIVATE KEY" in pem or "BEGIN CERTIFICATE" not in pem:
-        die("--cacert must hold PUBLIC certificates only")
+    cas = {}
+    for c in cacert or []:   # PARTY=FILE: each endpoint is verified against ITS org's CA root only (as p2p_san.py --ca-dir does), never against a bundle of all four
+        m = re.fullmatch(r"(bi|bank-a|bank-b|bank-c)=(.+)", c)
+        if not m or f"ca-{m.group(1)}.pem" in cas:
+            die(f"--ca {c!r} must be PARTY=FILE, once per party")
+        pem = open(m.group(2)).read()
+        if "PRIVATE KEY" in pem or "BEGIN CERTIFICATE" not in pem:
+            die("--ca files must hold PUBLIC certificates only")
+        cas[f"ca-{m.group(1)}.pem"] = pem
+    if {f"ca-{c.split('/')[0]}.pem" for c in checks} != set(cas):
+        die("--ca needs exactly one PARTY=FILE for every party named in --check")
     app = f"p2psan-{name}"
     pl = {**LABELS, "app.kubernetes.io/name": app, LOCK: "true"}
     meta = lambda nm, extra=None: {"name": nm, "namespace": ns, "labels": {**LABELS, **(extra or {})}}
-    cm = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(f"{app}-ca"), "data": {"ca.pem": pem}}
+    cm = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(f"{app}-ca"), "data": cas}
     np = {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(f"{app}-egress"),
           "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": app}}, "policyTypes": ["Ingress", "Egress"], "egress": [egress_rule(a) for a in allow]}}
     sec = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}, "runAsNonRoot": True, "runAsUser": UID}
@@ -422,8 +430,8 @@ def audit_p2psan(docs):
     if kinds != ["ConfigMap", "Job", "NetworkPolicy"]:
         return ["not exactly one ConfigMap, NetworkPolicy and Job"]
     cm, np, job = [next(d for d in docs if d["kind"] == k) for k in ("ConfigMap", "NetworkPolicy", "Job")]
-    if set(cm.get("data", {})) != {"ca.pem"} or "PRIVATE KEY" in cm["data"]["ca.pem"] or "BEGIN CERTIFICATE" not in cm["data"]["ca.pem"]:
-        p.append("CA ConfigMap is not public certificates only")
+    if not cm.get("data") or any(not re.fullmatch(r"ca-(bi|bank-a|bank-b|bank-c)\.pem", k) or "PRIVATE KEY" in v or "BEGIN CERTIFICATE" not in v for k, v in cm["data"].items()):
+        p.append("CA ConfigMap is not per-party public certificates only")
     t = job["spec"]["template"]; ps = t["spec"]; cs = ps.get("containers", [])
     if len(cs) != 1:
         return p + ["not exactly one container"]
@@ -464,6 +472,7 @@ def main():
     ap.add_argument("--allow", action="append", default=[])
     ap.add_argument("--mode")
     ap.add_argument("--check", action="append", default=[])
+    ap.add_argument("--ca", action="append", default=[])
     ap.add_argument("--alias", action="append", default=[])
     ap.add_argument("--txid")
     ap.add_argument("--needle")
@@ -481,9 +490,9 @@ def main():
                 die(f"--{o} is required")
         sys.stdout.write(render_setuppp(a.party, a.image, a.name, a.namespace))
     elif a.what == "p2psan":
-        if not a.name or not a.image or not a.cacert:
-            die("--name, --image and --cacert are required")
-        sys.stdout.write(render_p2psan(a.party, a.image, a.name, a.check, a.allow, a.alias, a.cacert))
+        if not a.name or not a.image or not a.ca:
+            die("--name, --image and --ca PARTY=FILE are required")
+        sys.stdout.write(render_p2psan(a.party, a.image, a.name, a.check, a.allow, a.alias, a.ca))
     elif a.what == "dbread":
         if not a.name or not a.mode:
             die("--name and --mode are required")

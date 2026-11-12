@@ -66,7 +66,7 @@ def renders():
     out += run(cer, "probe", "bi", "--image", IMG, "--name", "x1", "--try", "a=1.1.1.1:443", "--allow", "pod=orderer-router-1:8013", "--allow", "dns", "--allow", "ip=1.1.1.1/32:443",
                "--allow", "nspod=rd-fabricx-bank-a/rdbi-bank2:5104")
     out += run(cer, "dbread", "bank-a", "--name", "d1", "--mode", "status", "--txid", "ab" * 32)
-    out += run(cer, "p2psan", "bank-a", "--image", IMG, "--name", "s1", "--cacert", f"{d}/ca", "--check", "bank-a/bank2@bank2:5104", "--check", "bi/issuer@issuer:5101", "--allow", "pod=rdbi-bank2:5104",
+    out += run(cer, "p2psan", "bank-a", "--image", IMG, "--name", "s1", "--ca", f"bank-a={d}/ca", "--ca", f"bi={d}/ca", "--check", "bank-a/bank2@bank2:5104", "--check", "bi/issuer@issuer:5101", "--allow", "pod=rdbi-bank2:5104",
                "--allow", "nspod=rd-fabricx-bi/rdbi-bi:5101", "--alias", "10.1.1.1=bank2", "--alias", "10.1.1.2=issuer")
     for mode in ("run", "dry-run", "remove-prev", "restore-prev", "restore-prev-dry-run"):
         out += run(fsc, "job", "bank-c", "bank4", "--image", IMG, "--name", "g1", "--api-ips", "172.28.18.47,172.28.47.223", "--mode", mode)
