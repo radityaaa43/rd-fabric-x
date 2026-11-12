@@ -7,6 +7,7 @@ usage: render.py role <party>
        render.py readback bi --cacert FILE --mspca FILE --image repo@sha256:HEX --tx-name NAME              (`namespace list`, every party: its own committer-tls and query service)
        render.py setuppp bi --image repo@sha256:HEX --name NAME [--namespace rd_dfabi_v2]       (rdbi-driver setup-pp, BI only)
        render.py dbread <party> --name NAME --mode schema|status|occurrences [--txid HEX64] [--needle HEX] [--namespace rd_dfabi_v2]   (egress-locked read-only psql Job on the org's own committer-db; no exec)
+       render.py p2psan <party> --image repo@sha256:HEX --name NAME --cacert PEM --check PARTY/NODE@HOST:PORT ... --allow SPEC ... [--alias IP=host,host ...]   (p2p_san as a keyless in-cluster Job)
        render.py probe <party> --image repo@sha256:HEX --name NAME --try LABEL=HOST:PORT ... [--allow pod=APP:PORT | --allow dns ...]
 `role`: Role s14-sign + RoleBinding in rd-fabricx-<party>: jobs create+get, pods get, pods/log get, bound to the org's own party-admin ServiceAccount only. TIME-BOXED: created right before the
 org's signing and removed right after its Job completed (both logged in R13). party-admin cannot create a Role, so the operator creates it (R13).
@@ -351,9 +352,109 @@ def audit_dbread(docs, mode):
     return p
 
 
+P2PSAN_SCRIPT = r"""set +e
+command -v openssl >/dev/null || { echo "NO_OPENSSL in this image"; exit 3; }
+for t in "$@"; do
+  party=${t%%/*}; rest=${t#*/}; node=${rest%%@*}; hp=${rest#*@}; ns=rd-fabricx-$party
+  out=$(timeout 15 openssl s_client -connect "$hp" -servername "$node" -CAfile /ca/ca.pem -verify_hostname "$node" </dev/null 2>/dev/null)
+  if ! printf '%s' "$out" | grep -q 'BEGIN CERTIFICATE'; then echo "$party $node: no certificate presented from $hp"; continue; fi
+  cert=$(printf '%s\n' "$out" | sed -n '/BEGIN CERTIFICATE/,/END CERTIFICATE/p;/END CERTIFICATE/q')
+  names=$(printf '%s\n' "$cert" | openssl x509 -noout -ext subjectAltName 2>/dev/null | tr ',' '\n' | sed -n 's/^ *DNS://p' | tr '\n' ' ')
+  fp=$(printf '%s\n' "$cert" | openssl x509 -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2)
+  miss=""; for want in "$node" "$node.$ns.svc.cluster.local"; do case " $names" in *" $want "*) ;; *) miss="$miss $want";; esac; done
+  v=$(printf '%s\n' "$out" | sed -n 's/^.*Verify return code: \([0-9]*\) (\(.*\))$/\1:\2/p' | tail -1)
+  if [ "$v" = "0:ok" ]; then vv="verify OK"; else vv="verify FAIL $v"; fi
+  if [ -z "$miss" ]; then nm="OK"; else nm="MISSING$miss"; fi
+  echo "$party $node: SAN [$names] $nm | $vv | sha256 $fp"
+done
+"""   # prints one line per endpoint in the shape of p2p_san.py live: only SAN names, OK/MISSING, verify result and the PUBLIC cert fingerprint
+
+
+def render_p2psan(party, image, name, checks, allow, aliases, cacert):
+    """p2p_san.py as a keyless in-cluster Job: the P2P listeners are checked FROM a pod that carries the egress lock and may reach exactly the listed endpoints (no host port-forward)."""
+    n, ns = check(party)
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image or ""):
+        die("--image must be pinned by digest (repo@sha256:<64 hex>)")
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,28}[a-z0-9])?", name or ""):
+        die("--name must be 1-30 chars of [a-z0-9-]")
+    if not checks or not all(re.fullmatch(r"(bi|bank-a|bank-b|bank-c)/[a-z0-9][a-z0-9-]*@[A-Za-z0-9.-]+:\d{1,5}", c) and 0 < int(c.rsplit(":", 1)[1]) < 65536 for c in checks):
+        die("--check must be PARTY/NODE@HOST:PORT, at least one")
+    if not allow:
+        die("--allow is required (every endpoint needs its rule)")
+    al = []
+    for a in aliases or []:
+        m = re.fullmatch(r"(\d{1,3}(?:\.\d{1,3}){3})=([A-Za-z0-9.,-]+)", a)
+        if not m or any(int(x) > 255 for x in m.group(1).split(".")):
+            die(f"--alias {a!r} must be IPV4=host[,host...]")
+        al.append({"ip": m.group(1), "hostnames": m.group(2).split(",")})
+    pem = open(cacert).read()
+    if "PRIVATE KEY" in pem or "BEGIN CERTIFICATE" not in pem:
+        die("--cacert must hold PUBLIC certificates only")
+    app = f"p2psan-{name}"
+    pl = {**LABELS, "app.kubernetes.io/name": app, LOCK: "true"}
+    meta = lambda nm, extra=None: {"name": nm, "namespace": ns, "labels": {**LABELS, **(extra or {})}}
+    cm = {"apiVersion": "v1", "kind": "ConfigMap", "metadata": meta(f"{app}-ca"), "data": {"ca.pem": pem}}
+    np = {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(f"{app}-egress"),
+          "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": app}}, "policyTypes": ["Ingress", "Egress"], "egress": [egress_rule(a) for a in allow]}}
+    sec = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}, "runAsNonRoot": True, "runAsUser": UID}
+    spec = {"automountServiceAccountToken": False, "restartPolicy": "Never",
+            "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "fsGroup": UID, "seccompProfile": {"type": "RuntimeDefault"}},
+            "containers": [{"name": "p2psan", "image": image, "command": ["bash", "-c", P2PSAN_SCRIPT, "p2psan", *checks], "securityContext": sec,
+                            "volumeMounts": [{"name": "ca", "mountPath": "/ca", "readOnly": True}],
+                            "resources": {"requests": {"cpu": "20m", "memory": "32Mi", "ephemeral-storage": "8Mi"}, "limits": {"cpu": "200m", "memory": "64Mi", "ephemeral-storage": "16Mi"}}}],
+            "volumes": [{"name": "ca", "configMap": {"name": f"{app}-ca"}}]}
+    if al:
+        spec["hostAliases"] = al
+    job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta(app, {"app.kubernetes.io/name": app}),
+           "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 180, "ttlSecondsAfterFinished": 900, "template": {"metadata": {"labels": pl}, "spec": spec}}}
+    check_locked([job])
+    docs = [cm, np, job]
+    problems = audit_p2psan(docs)
+    if problems:
+        die("p2psan audit: " + "; ".join(problems))
+    return yaml.safe_dump_all(docs, sort_keys=False)
+
+
+def audit_p2psan(docs):
+    """Problems (empty = fine): public CA only, no Secret, pinned image, the fixed script, egress-locked with ONLY the endpoint rules (no DNS, no extra destination)."""
+    p = []
+    kinds = sorted(d["kind"] for d in docs)
+    if kinds != ["ConfigMap", "Job", "NetworkPolicy"]:
+        return ["not exactly one ConfigMap, NetworkPolicy and Job"]
+    cm, np, job = [next(d for d in docs if d["kind"] == k) for k in ("ConfigMap", "NetworkPolicy", "Job")]
+    if set(cm.get("data", {})) != {"ca.pem"} or "PRIVATE KEY" in cm["data"]["ca.pem"] or "BEGIN CERTIFICATE" not in cm["data"]["ca.pem"]:
+        p.append("CA ConfigMap is not public certificates only")
+    t = job["spec"]["template"]; ps = t["spec"]; cs = ps.get("containers", [])
+    if len(cs) != 1:
+        return p + ["not exactly one container"]
+    c = cs[0]
+    if t["metadata"]["labels"].get(LOCK) != "true":
+        p.append("rd/egress-locked label missing")
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", c.get("image", "")):
+        p.append("image is not pinned by digest")
+    if c.get("command", [None] * 3)[:3] != ["bash", "-c", P2PSAN_SCRIPT]:
+        p.append("script differs from the pinned one")
+    if "env" in c or "envFrom" in c or ps.get("automountServiceAccountToken") is not False or ps.get("serviceAccountName"):
+        p.append("env / service account token present")
+    vols = ps.get("volumes", [])
+    if len(vols) != 1 or set(vols[0]) != {"name", "configMap"} or "secret" in yaml.safe_dump(t).lower():
+        p.append("volumes other than the one CA ConfigMap, or a secret reference")
+    rules = np["spec"].get("egress", [])
+    ports = {r_["port"] for r in rules for r_ in r["ports"]}
+    want = {int(x.rsplit(":", 1)[1]) for x in c.get("command", [])[4:]}
+    if "ingress" in np["spec"] or np["spec"].get("policyTypes") != ["Ingress", "Egress"] or ports != want or any(53 in [r_["port"] for r_ in r["ports"]] for r in rules):
+        p.append("egress is not exactly the endpoint ports (no DNS, no extra port/destination)")
+    if len(rules) != len({yaml.safe_dump(r) for r in rules}):
+        p.append("duplicate egress rule")
+    sp = job["spec"]
+    if (sp.get("backoffLimit"), sp.get("ttlSecondsAfterFinished"), ps.get("restartPolicy")) != (0, 900, "Never") or not 0 < sp.get("activeDeadlineSeconds", 0) <= 180:
+        p.append("Job lifetime fields differ")
+    return p
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("what", choices=["role", "job", "probe", "submit", "readback", "setuppp", "dbread"])
+    ap.add_argument("what", choices=["role", "job", "probe", "submit", "readback", "setuppp", "dbread", "p2psan"])
     ap.add_argument("party")
     for o in ("tx", "cacert", "image", "tx-name", "name"):
         ap.add_argument(f"--{o}")
@@ -362,6 +463,8 @@ def main():
     ap.add_argument("--try", dest="tries", action="append", default=[])
     ap.add_argument("--allow", action="append", default=[])
     ap.add_argument("--mode")
+    ap.add_argument("--check", action="append", default=[])
+    ap.add_argument("--alias", action="append", default=[])
     ap.add_argument("--txid")
     ap.add_argument("--needle")
     a = ap.parse_args()
@@ -377,6 +480,10 @@ def main():
             if not getattr(a, o):
                 die(f"--{o} is required")
         sys.stdout.write(render_setuppp(a.party, a.image, a.name, a.namespace))
+    elif a.what == "p2psan":
+        if not a.name or not a.image or not a.cacert:
+            die("--name, --image and --cacert are required")
+        sys.stdout.write(render_p2psan(a.party, a.image, a.name, a.check, a.allow, a.alias, a.cacert))
     elif a.what == "dbread":
         if not a.name or not a.mode:
             die("--name and --mode are required")
