@@ -3,6 +3,8 @@
 
 usage: reenroll_render.py role <party>
        reenroll_render.py job <party> <node> --image repo@sha256:HEX --name GEN --api-ips <ep1>,<ep2> [--mode run|dry-run|remove-prev|restore-prev|restore-prev-dry-run]
+       reenroll_render.py ca-role <party>                                                      R4: SA fca-rotate + Role (ONE Secret fca-org<N>-admin, get+patch) + RoleBinding, time-boxed (R13)
+       reenroll_render.py ca-job <party> --image repo@sha256:HEX --name GEN --api-ips <ep1>,<ep2>   R4: NetworkPolicy + Job fca-rotate-admin-<GEN> (`fsc-reenroll --rotate-admin`, see reenroll/rotate.go)
 `role`: SA fsc-reenroll + Role fsc-reenroll (ONLY secrets get+patch, resourceNames [rdbi-<pod>-files]) + RoleBinding. TIME-BOXED: the operator creates it right before the org's Job and removes it right after (R13 log).
 `job`: NetworkPolicy + Job fsc-reenroll-<node>-<GEN> in rd-fabricx-<party>, applied by the org's OWN party-admin (the existing time-boxed s14-sign Role lets it create Jobs):
   image (digest, contains fabric-ca-client + the `fsc-reenroll` helper) runs `fabric-ca-client reenroll --csr.hosts <node>,<node>.<ns>.svc.cluster.local` authenticated by the CURRENT identity cert+key mounted from
@@ -41,6 +43,17 @@ def render_role(party):
          "rules": [{"apiGroups": [""], "resources": ["secrets"], "resourceNames": [f"rdbi-{pod}-files"], "verbs": ["get", "patch"]}]},
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": meta,
          "subjects": [{"kind": "ServiceAccount", "name": "fsc-reenroll", "namespace": ns}], "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "fsc-reenroll"}}], sort_keys=False)
+
+
+def render_ca_role(party):
+    n, pod, nodes, ns = check(party)
+    meta = {"name": "fca-rotate", "namespace": ns, "labels": LABELS}
+    return yaml.safe_dump_all([
+        {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": meta, "automountServiceAccountToken": False},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role", "metadata": meta,
+         "rules": [{"apiGroups": [""], "resources": ["secrets"], "resourceNames": [f"fca-org{n}-admin"], "verbs": ["get", "patch"]}]},
+        {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding", "metadata": meta,
+         "subjects": [{"kind": "ServiceAccount", "name": "fca-rotate", "namespace": ns}], "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": "fca-rotate"}}], sort_keys=False)
 
 
 def egress(spec):
@@ -93,9 +106,38 @@ def render_job(party, node, image, name, api_ips, mode="run"):
     return yaml.safe_dump_all([np, job], sort_keys=False)
 
 
+def render_ca_job(party, image, name, api_ips):
+    """R4: rotate the CA admin password inside the org's namespace. No mounted Secret (the helper reads/patches `fca-org<N>-admin` through the API with the Job's SA token), only a memory scratch dir."""
+    n, pod, nodes, ns = check(party)
+    if not re.fullmatch(r".+@sha256:[0-9a-f]{64}", image or ""):
+        die("--image must be pinned by digest (repo@sha256:<64 hex>)")
+    if not re.fullmatch(r"[a-z0-9]([a-z0-9-]{0,18}[a-z0-9])?", name or ""):
+        die("--name must be 1-20 chars of [a-z0-9-]")
+    ips = (api_ips or "").split(",")
+    if not api_ips or len(set(ips)) != len(ips) or any(not re.fullmatch(r"\d{1,3}(?:\.\d{1,3}){3}", i) or any(int(x) > 255 for x in i.split(".")) or i == "0.0.0.0" for i in ips):
+        die("--api-ips must be the distinct IPv4 ENDPOINTS of Service kubernetes, comma separated")
+    app = f"fca-rotate-admin-{name}"
+    meta = lambda nm, extra=None: {"name": nm, "namespace": ns, "labels": {**LABELS, **(extra or {})}}
+    np = {"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(f"{app}-egress"),
+          "spec": {"podSelector": {"matchLabels": {"app.kubernetes.io/name": app}}, "policyTypes": ["Ingress", "Egress"],
+                   "egress": [egress(("pod", (f"fca-org{n}", 7054))), *[egress(("ip", (f"{i}/32", 6443))) for i in ips], egress("dns")]}}
+    sec = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}, "runAsNonRoot": True, "runAsUser": UID}
+    cmd = ["fsc-reenroll", "--rotate-admin", "--ca-url", f"http://fca-org{n}.{ns}.svc.cluster.local:7054", "--secret", f"fca-org{n}-admin", "--work", "/work"]
+    job = {"apiVersion": "batch/v1", "kind": "Job", "metadata": meta(app, {"app.kubernetes.io/name": app}),
+           "spec": {"backoffLimit": 0, "activeDeadlineSeconds": 180, "ttlSecondsAfterFinished": 900,
+                    "template": {"metadata": {"labels": {**LABELS, "app.kubernetes.io/name": app, LOCK: "true"}}, "spec": {
+                        "serviceAccountName": "fca-rotate", "automountServiceAccountToken": True, "restartPolicy": "Never",
+                        "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "fsGroup": UID, "seccompProfile": {"type": "RuntimeDefault"}},
+                        "imagePullSecrets": [{"name": "ghcr-pull"}],
+                        "containers": [{"name": "rotate", "image": image, "command": cmd, "securityContext": sec, "volumeMounts": [{"name": "work", "mountPath": "/work"}],
+                                        "resources": {"requests": {"cpu": "20m", "memory": "32Mi", "ephemeral-storage": "8Mi"}, "limits": {"cpu": "500m", "memory": "128Mi", "ephemeral-storage": "16Mi"}}}],
+                        "volumes": [{"name": "work", "emptyDir": {"medium": "Memory"}}]}}}}
+    return yaml.safe_dump_all([np, job], sort_keys=False)
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("what", choices=["role", "job"])
+    ap.add_argument("what", choices=["role", "job", "ca-role", "ca-job"])
     ap.add_argument("party")
     ap.add_argument("node", nargs="?")
     for o in ("image", "name", "api-ips"):
@@ -104,6 +146,12 @@ def main():
     a = ap.parse_args()
     if a.what == "role":
         sys.stdout.write(render_role(a.party))
+    elif a.what == "ca-role":
+        sys.stdout.write(render_ca_role(a.party))
+    elif a.what == "ca-job":
+        if not (a.image and a.name and a.api_ips):
+            die("ca-job needs --image --name --api-ips")
+        sys.stdout.write(render_ca_job(a.party, a.image, a.name, a.api_ips))
     else:
         if not (a.node and a.image and a.name and a.api_ips):
             die("job needs <node> --image --name --api-ips")
