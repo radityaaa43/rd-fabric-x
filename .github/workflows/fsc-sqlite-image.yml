@@ -80,6 +80,16 @@ jobs:
           id="$(docker image inspect "$ref" --format '{{.Id}}')"
           echo "pulled ${ref} imageID ${id}" | tee -a "$GITHUB_STEP_SUMMARY"
           test "$id" = "$DIGEST"
+      - name: Key scan of the PULLED digest (what the cluster will run)
+        env:
+          PKG: fsc-sqlite-ci
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          # the scan before the push saw the local build; this one saves the image pulled by digest (same layers the cluster pulls) and applies the same allow-list and Dockerfile base rule
+          set -euo pipefail
+          ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${PKG}@${DIGEST}"
+          docker save "$ref" -o "$RUNNER_TEMP/pulled.tar"
+          python3 panurus-itest/scripts/scan_image_keys.py "$RUNNER_TEMP/pulled.tar" --allow panurus-itest/k8s/scan-allow.txt --dockerfile multiorg/fsc/state/Dockerfile | tee -a "$GITHUB_STEP_SUMMARY"
       # the repository is public, so the signed attestation is available (job permissions id-token + attestations)
       - if: ${{ github.event.repository.private == false }}
         uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3

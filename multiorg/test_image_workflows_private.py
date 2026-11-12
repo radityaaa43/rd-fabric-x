@@ -9,6 +9,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 WF_DIR = os.environ.get("WF_DIR") or os.path.join(ROOT, ".github", "workflows")   # WF_DIR lets the RED run point at the old workflow files
 PACKAGES = {"tools-image.yml": "fabricx-tools-ci", "fsc-reenroll-image.yml": "fsc-reenroll-ci", "fsc-sqlite-image.yml": "fsc-sqlite-ci", "rdbi-image.yml": "rdbi-node-ci"}
 STEP = "Assert the package is private"
+DOCKERFILE = {'tools-image.yml': 'multiorg/ceremony/Dockerfile', 'fsc-reenroll-image.yml': 'multiorg/fsc/reenroll/Dockerfile', 'fsc-sqlite-image.yml': 'multiorg/fsc/state/Dockerfile', 'rdbi-image.yml': 'panurus-itest/k8s/Dockerfile'}
 
 
 class PackagePrivate(unittest.TestCase):
@@ -62,6 +63,25 @@ class PackagePrivate(unittest.TestCase):
             self.assertNotIn("${{", run, wf)
             names = [x.get("name") or x.get("uses", "") for x in self.steps(wf)]
             self.assertTrue(any("docker/login-action" in n for n in names[:names.index(s["name"])]), wf)   # authenticated: the login step comes first
+
+    def test_the_pulled_digest_is_key_scanned_after_the_pull_test_and_before_the_attest(self):
+        """the pre-push scan sees the local build; the PULLED digest (what the cluster will run) is scanned too, with the same allow-list and the Dockerfile of that image"""
+        for wf, pkg in PACKAGES.items():
+            st = self.steps(wf)
+            names = [s.get("name") or s.get("uses", "") for s in st]
+            pull = [k for k, s in enumerate(st) if s.get("name", "").startswith("Pull test")][0]
+            scan = [k for k, s in enumerate(st) if s.get("name", "").startswith("Key scan of the PULLED digest")]
+            att = [k for k, s in enumerate(st) if "attest-build-provenance" in s.get("uses", "")][0]
+            self.assertEqual(len(scan), 1, wf)
+            self.assertTrue(pull < scan[0] < att, f"{wf}: want pull test < pulled-digest scan < attest")
+            s = st[scan[0]]
+            self.assertEqual(s["env"], {"PKG": pkg, "DIGEST": "${{ steps.build.outputs.digest }}"}, wf)
+            run = s["run"]
+            self.assertIn("set -euo pipefail", run, wf)
+            self.assertIn('ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${PKG}@${DIGEST}"', run, wf)       # the digest, not a tag, not the local scan image
+            self.assertIn('docker save "$ref" -o "$RUNNER_TEMP/pulled.tar"', run, wf)
+            self.assertIn('scan_image_keys.py "$RUNNER_TEMP/pulled.tar" --allow panurus-itest/k8s/scan-allow.txt --dockerfile ' + DOCKERFILE[wf], run, wf)
+            self.assertNotIn("${{", run, wf)
 
     def test_the_four_pushing_workflows_are_all_covered(self):
         pushing = []
