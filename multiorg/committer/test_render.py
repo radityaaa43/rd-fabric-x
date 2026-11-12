@@ -377,6 +377,11 @@ class Drift(Base):
         with self.patched("verifier.yaml", "parallelism: 8", "parallelism: 4"):
             self.assertEqual(self.cfg("bi", "verifier")["parallelism"], 4)
 
+def r22_term(role, party):
+    """R22 (worker = failure domain): a role pod may not share a worker with the same role of ANOTHER party, across the rd-fabricx-* namespaces."""
+    return {"topologyKey": "kubernetes.io/hostname", "namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}},
+            "labelSelector": {"matchExpressions": [{"key": "rd/role", "operator": "In", "values": [f"fabricx-{role}"]},
+                                                   {"key": "party", "operator": "NotIn", "values": [party]}]}}
 
 class Placement(Base):
     def test_cluster1_defaults(self):
@@ -389,6 +394,16 @@ class Placement(Base):
                 for x in w["spec"].get("volumeClaimTemplates", []):
                     self.assertEqual(x["spec"]["storageClassName"], "alicloud-essd-wffc")
                 self.assertEqual({a["ip"] for a in spec.get("hostAliases", [])}, set(C1.values()) if n == "committer-sidecar" else set())
+    def test_r22_committer_pods_never_share_a_worker_with_another_party_committer(self):
+        for party in ("bi", "bank-a", "bank-b", "bank-c"):
+            ws = self.workloads(party)
+            self.assertTrue(ws)
+            for n, w in ws.items():
+                t = w["spec"]["template"]
+                self.assertEqual(t["metadata"]["labels"]["rd/role"], "fabricx-committer", n)
+                self.assertEqual(t["spec"]["affinity"]["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"], [r22_term("committer", party)], n)
+                self.assertEqual("nodeAffinity" in t["spec"]["affinity"], party != "bank-c", n)   # cluster-1 AVOID_NODES stay; cluster 2 has none
+
 
     def test_bank_c_requires_storage_class_only(self):
         for over in ({}, {"zone": "ap-southeast-1a"}):
@@ -404,7 +419,7 @@ class Placement(Base):
         for n, w in self.workloads("bank-c").items():
             spec = w["spec"]["template"]["spec"]
             self.assertNotIn("nodeSelector", spec)                               # no zone pin: zone 1a had no room, the class binds on first consumer
-            self.assertNotIn("affinity", spec)                                   # the cluster-1 node names do not exist there
+            self.assertNotIn("nodeAffinity", spec["affinity"])                   # the cluster-1 node names do not exist there (only the R22 podAntiAffinity)
             for x in w["spec"].get("volumeClaimTemplates", []):
                 self.assertEqual(x["spec"]["storageClassName"], "fabricx-essd")
         al = self.workloads("bank-c")["committer-sidecar"]["spec"]["template"]["spec"]["hostAliases"]

@@ -9,7 +9,7 @@ refused unless its sha256 equals HEX and it is at most 700 KiB. Output (YAML doc
 NetworkPolicy allow-arma-peers, then 4 StatefulSets orderer-{router,batcher,consenter,assembler}-<N>. No Secret (orderer-<role>-<N>-secret is made by enroll.py)
 and no Service (lb-<N> is made by multiorg/lb/render.py). See RUNBOOK-S11.md.
 """
-import argparse, base64, glob, hashlib, ipaddress, os, re, sys
+import argparse, base64, copy, glob, hashlib, ipaddress, os, re, sys
 import yaml
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "fca"))
@@ -20,6 +20,14 @@ import check_exchange
 HERE = os.path.dirname(os.path.abspath(__file__))
 IMAGE = "docker.io/hyperledger/fabric-x-orderer@sha256:052ae8e16571d3d4de2e1a0c4e9ed0d979d782d3539d3c8fb1f7f66fe560e265"  # 1.0.4, as running today
 DEFAULT_SC, DEFAULT_ZONE = "alicloud-essd-wffc", "ap-southeast-5b"   # cluster 1, as multiorg/fca/render.py
+def role_anti_affinity(role, party):
+    """R22 (a worker is a failure domain): a pod labelled rd/role=fabricx-<role> must not share a worker with the same role of ANOTHER party, across the rd-fabricx-* namespaces (cluster-local)."""
+    return {"topologyKey": "kubernetes.io/hostname", "namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}},
+            "labelSelector": {"matchExpressions": [{"key": "rd/role", "operator": "In", "values": [f"fabricx-{role}"]},
+                                                   {"key": "party", "operator": "NotIn", "values": [party]}]}}
+
+
+R22_ARMA = {"consenter": "consenter", "batcher1": "batcher"}   # router and assembler are not in R22 scope
 AVOID_NODES = ["member-16033-node", "member-16034-node"]            # as panurus-itest/scripts/k8s.py: nodes other work uses (cluster 1)
 # the block goes into a ConfigMap as base64 binaryData (x 4/3) and the whole object must stay under 1 MiB: 700 KiB raw is ~934 KiB encoded
 MAX_GENESIS = 700 * 1024
@@ -189,7 +197,10 @@ def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zo
     for i, role in enumerate(ROLES):
         obj = ID_ARG[role]
         name = f"orderer-{obj}-{n}"
-        labels = {**base, "app.kubernetes.io/name": name, "rd-fabricx/arma-party": str(n)}
+        labels = {**base, "app.kubernetes.io/name": name, "rd-fabricx/arma-party": str(n), **({"rd/role": f"fabricx-{R22_ARMA[role]}"} if role in R22_ARMA else {})}
+        aff = copy.deepcopy(affinity)
+        if role in R22_ARMA:
+            aff["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"] = [role_anti_affinity(R22_ARMA[role], party)]
         secret_keys = {"msp-keystore-priv_sk": "/config/msp/keystore/priv_sk", "msp-signcert.pem": f"/config/msp/signcerts/{role}-cert.pem",
                        "tls-server.key": "/config/tls/server.key", "tls-server.crt": "/config/tls/server.crt"}
         mount = lambda vol, path, sub: {"name": vol, "mountPath": path, "subPath": sub, "readOnly": True}
@@ -208,7 +219,7 @@ def render(party, exchange, genesis, genesis_sha256, image=IMAGE, replicas=1, zo
             "spec": {"replicas": replicas, "serviceName": f"lb-{n}", "selector": {"matchLabels": {"app.kubernetes.io/name": name}},
                      "template": {"metadata": {"labels": labels}, "spec": {
                          "securityContext": {"runAsNonRoot": True, "runAsUser": UID, "seccompProfile": {"type": "RuntimeDefault"}, "fsGroup": UID},
-                         **({"nodeSelector": {"topology.kubernetes.io/zone": zone}} if zone else {}), "affinity": affinity, "hostAliases": aliases,
+                         **({"nodeSelector": {"topology.kubernetes.io/zone": zone}} if zone else {}), "affinity": aff, "hostAliases": aliases,
                          "containers": [{
                              "name": "orderer", "image": image, "args": [CLI_CMD[role], "--config=/config/node_config.yaml"],
                              # S11 pod contract with lb-<N>: one NAMED port per role pod (the Service targetPort), plus ops on its own number

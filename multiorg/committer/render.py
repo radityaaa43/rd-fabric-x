@@ -137,11 +137,13 @@ def render(party, image=COMMITTER_IMAGE, pg_image=PG_IMAGE, zone=None, storage_c
             {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": list(arma.AVOID_NODES)}]}]}}}
 
     def workload(kind, name, containers, volumes, uid, claims=None, extra_spec=None):
-        labels = {**base, "app.kubernetes.io/name": name}
+        labels = {**base, "app.kubernetes.io/name": name, "rd/role": "fabricx-committer"}
+        pl = copy.deepcopy(place)
+        pl.setdefault("affinity", {})["podAntiAffinity"] = {"requiredDuringSchedulingIgnoredDuringExecution": [arma.role_anti_affinity("committer", party)]}   # R22
         spec = {"replicas": 1, "selector": {"matchLabels": {"app.kubernetes.io/name": name}},
                 "template": {"metadata": {"labels": labels}, "spec": {
                     "securityContext": {"runAsNonRoot": True, "runAsUser": uid, "fsGroup": uid, "seccompProfile": {"type": "RuntimeDefault"}},
-                    **copy.deepcopy(place), **(extra_spec or {}), "containers": containers, "volumes": volumes}}}
+                    **pl, **(extra_spec or {}), "containers": containers, "volumes": volumes}}}
         if kind == "StatefulSet":
             spec["serviceName"] = name
             spec["volumeClaimTemplates"] = [{"metadata": {"name": c, "labels": dict(base)}, "spec": {

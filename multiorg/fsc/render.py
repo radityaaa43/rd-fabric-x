@@ -181,9 +181,10 @@ def render(party, templates, fsc_exchange, tls_exchange, image, p2p_ips, storage
             "initContainers": [init_c], "containers": conts, "volumes": vols}
     if zone:
         spec["nodeSelector"] = {"topology.kubernetes.io/zone": zone}
+    spec["affinity"] = {"podAntiAffinity": {"requiredDuringSchedulingIgnoredDuringExecution": [arma.role_anti_affinity("fsc", party)]}}   # R22
     pl = {"app.kubernetes.io/name": f"rdbi-{pod}"}
     docs.append({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta(f"rdbi-{pod}", pl),
-                 "spec": {"replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": pl}, "template": {"metadata": {"labels": {**base, **pl}}, "spec": spec}}})
+                 "spec": {"replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": pl}, "template": {"metadata": {"labels": {**base, **pl, "rd/role": "fabricx-fsc"}}, "spec": spec}}})
     if p2p_lb:
         acl, ranges = p2p_lb.get("acl_id"), p2p_lb.get("ranges") or []
         if not re.fullmatch(r"acl-[a-z0-9]+", acl or ""):
