@@ -26,5 +26,8 @@ Status: repo only. Nothing here touches a cluster. Source: final-design/fabricx/
 - Real core.yaml keys that the local template does not show. The rewriter refuses unknown host paths on purpose.
 - ids/anon, the Idemix owner wallet and the issuer wallet MSP stay central until S15: an own-only import step (piece 4), never another node's files.
 
+## Egress lock label (R17)
+The pod template of this Deployment carries `rd/egress-locked: "true"`. The namespace policy `allow-dns-egress` allows ALL egress for every pod WITHOUT that label and K8s policies are additive, so without the label the egress rules of this render bind nothing. Adding the label changes the pod template: a rollout (Recreate) of the pod. Never part of the Deployment or Service selector.
+
 ## S14 prerequisite: the view API client cert swap (`--gw-exchange`)
 Every node core lists ONE client cert for the view API (`fsc.client.certs`): the `<node>-admin` cert whose key `enroll_fsc.py` dropped on purpose, so nobody can call any node today. The gateway signs with its own identity `<node>-gw` (`multiorg/gw/enroll_gw.py`). `render.py ... --gw-exchange <dir with org<N>/gw/<node>-gw.pem>` swaps it for the PARTY node only (issuer, bank2, bank3, bank4; the endorser has no gateway): `fsc.client.certs` of `rdbi-core-<node>` becomes `$T/public/gw/<node>-gw.pem`, ConfigMap `rdbi-public` gets the key `gw__<node>-gw.pem` (a public certificate) and the Deployment `public` volume one item. Against the live objects the diff is exactly these three objects per org (21 changed lines: Deployment +2 lines, core -1/+1, public key + certificate). The Deployment change rolls the pod (Recreate): the node reads its core at start. Apply = a field change on live objects = its own text.

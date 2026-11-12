@@ -31,6 +31,9 @@ The driver dials `https://fx-gw-<M>:8443/` (`serve.go:43`, hardcoded). Same-clus
 ## Identity binding (lead's condition; the rego is besu's)
 Trust bundle = Lensa CA + 4 TLS CAs, so any org CA can mint `CN=fx-gw-1`. Envoy therefore sets `forward_client_cert_details: SANITIZE_SET` and `set_current_client_cert_details {cert, subject}`; the rego must accept `fx-gw-<N>` only when the leaf verifies against org N's TLS CA, and `lensa` only against `bank-gw-ca-<N>`. XFCC has NO issuer field at the pinned envoy (a config with `issuer: true` is refused by `--mode validate`), so the rego verifies the forwarded leaf PEM against CA PEMs from its data.
 
+## Egress lock label (R17)
+The pod template of this Deployment carries `rd/egress-locked: "true"`. The namespace policy `allow-dns-egress` allows ALL egress for every pod WITHOUT that label and K8s policies are additive, so without the label the egress rules of this render bind nothing. Adding the label changes the pod template: a rollout (Recreate) of the pod. Never part of the Deployment or Service selector.
+
 ## Smoke (run before every apply of a changed render)
 `python3 -I multiorg/gw/smoke.py --templates DIR --opa-config FILE --gw-ips FILE --envoy-image ... --opa-image ...`: `envoy --mode validate` on the rendered config and OPA started with the rendered args (must reach `Starting gRPC server`; only the bundle pull may fail).
 

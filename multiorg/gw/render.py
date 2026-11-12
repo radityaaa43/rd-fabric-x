@@ -28,6 +28,7 @@ HOME = "/home/rdbi"
 T = f"{HOME}/.fabricx-token"
 A = "service.beta.kubernetes.io/alibaba-cloud-loadbalancer-"
 LABELS = {"app.kubernetes.io/part-of": "rd-fabricx"}
+LOCK = "rd/egress-locked"   # the namespace policy allow-dns-egress allows ALL egress for pods WITHOUT this label; without it the fx-gw-<N> egress policy binds nothing (R17)
 HOST32 = r"\d+\.\d+\.\d+\.\d+/32"
 SEC = {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True, "capabilities": {"drop": ["ALL"]}, "runAsNonRoot": True, "runAsUser": UID}
 
@@ -181,7 +182,7 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
     if aliases:
         spec["hostAliases"] = aliases
     docs.append({"apiVersion": "apps/v1", "kind": "Deployment", "metadata": meta(name, pl),
-                 "spec": {"replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": pl}, "template": {"metadata": {"labels": {**LABELS, **pl}}, "spec": spec}}})
+                 "spec": {"replicas": 1, "strategy": {"type": "Recreate"}, "selector": {"matchLabels": pl}, "template": {"metadata": {"labels": {**LABELS, **pl, LOCK: "true"}}, "spec": spec}}})
     docs.append({"apiVersion": "v1", "kind": "Service", "metadata": meta(name, pl),
                  "spec": {"selector": pl, "ports": [{"name": "fxapi", "port": 8443, "targetPort": 8443}]}})
     for m in sorted(same):
