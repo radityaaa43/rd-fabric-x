@@ -1,4 +1,5 @@
-"""Egress form audit (orchestrator decision 2026-11-12, all tracks): every egress rule of the S14/S13 Job and probe renders is one of
+"""Egress form audit (orchestrator decision 2026-11-12, all tracks): every egress rule of the S14/S13 Job and probe renders, the FSC pod render (rdbi-traffic, 4 parties, R17)
+and the gateway render (fx-gw-<N>, 4 parties, --restrict-egress, R17) is one of
   - same-namespace pod: podSelector with matchLabels only (never {});
   - another namespace's pod: namespaceSelector (exact kubernetes.io/metadata.name) AND podSelector (matchLabels) in ONE rule;
   - ipBlock only as a single /32 host (the other cluster's LB IP, the API-server endpoints);
@@ -18,6 +19,32 @@ def run(*a):
     r = subprocess.run([sys.executable, "-I", *a], capture_output=True, text=True)
     assert r.returncode == 0, (a, r.stderr)
     return [d for d in yaml.safe_load_all(r.stdout) if d]
+
+
+def load(rel, name):
+    spec = importlib.util.spec_from_file_location(name, os.path.join(ROOT, rel))
+    m = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m)
+    return m
+
+
+def pod_renders():
+    """The R17 key-holder pods: NetworkPolicy of the FSC render and of the gateway render for all four parties (inputs = the fixtures of their own test files)."""
+    out = []
+    ft = load("fsc/test_render.py", "fsc_test_render")
+    for p in ft.PARTIES:
+        t = ft.Base("setUp")
+        t.setUp()
+        try:
+            out += [d for d in t.r(p) if d["kind"] == "NetworkPolicy"]
+        finally:
+            t.tmp.cleanup()
+    gt = load("gw/test_render.py", "gw_test_render")
+    with tempfile.TemporaryDirectory() as root:
+        gt.make_inputs(root)
+        for p in gt.PARTIES:
+            out += [d for d in gt.build(root, p, restrict_egress=True) if d["kind"] == "NetworkPolicy"]
+    return out
 
 
 def renders():
@@ -64,6 +91,16 @@ class Form(unittest.TestCase):
     def test_every_egress_rule_of_the_job_and_probe_renders_has_the_decided_form(self):
         nps = renders()
         self.assertGreaterEqual(len(nps), 10)
+        self.audit(nps, 6)
+
+    def test_the_fsc_pod_and_gateway_renders_of_all_four_parties_have_the_decided_form(self):
+        nps = pod_renders()
+        self.assertEqual(sorted(n["metadata"]["name"] for n in nps), sorted(["rdbi-traffic"] * 4 + [f"fx-gw-{n}" for n in (1, 2, 3, 4)]))
+        for np in nps:
+            self.assertIn("Egress", np["spec"]["policyTypes"], np["metadata"]["name"])
+        self.audit(nps, 8)
+
+    def audit(self, nps, min_dns):
         seen_dns = 0
         for np in nps:
             for rule in np["spec"].get("egress", []):
@@ -75,7 +112,7 @@ class Form(unittest.TestCase):
                         seen_dns += 1
                         self.assertEqual(to["podSelector"], {"matchLabels": {"k8s-app": "kube-dns"}})
                         self.assertEqual(sorted(p["port"] for p in rule["ports"]), [53, 53])
-        self.assertGreater(seen_dns, 5)
+        self.assertGreaterEqual(seen_dns, min_dns)
 
     def test_the_checker_catches_the_old_forms(self):
         for bad in ({"podSelector": {}}, {"namespaceSelector": {}}, {"namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}}, "podSelector": {"matchLabels": {"a": "b"}}},

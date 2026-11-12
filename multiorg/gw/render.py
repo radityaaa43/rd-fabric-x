@@ -5,22 +5,23 @@ usage: render.py bi|bank-a|bank-b|bank-c --templates <live dir with <node>/clien
                  --image repo@sha256:HEX (rdbi-node: fxapi) --envoy-image repo@sha256:HEX --opa-image repo@sha256:HEX
                  --tls-exchange DIR (org1..org4/msp/tlscacerts/*.pem: ONE root CA per org, public) --opa-config FILE (opa.yaml + the PUBLIC `keys:` block, ~/.opa-keys/opa-config.yaml) --gw-cert FILE (public cert of identity <node>-gw)
                  --gw-ips FILE ({cluster1:{N: addr}, cluster2:{N: addr}}: address of each gateway for peers in the OTHER cluster)
-                 [--lb-acl acl-ID --lb-range <ipv4>/32 ...] [--public-params FILE (bi only: for the one-off `rdbi-driver setup-pp`)]
+                 [--lb-acl acl-ID --lb-range <ipv4>/32 ...] [--public-params FILE (bi only: for the one-off `rdbi-driver setup-pp`)] [--restrict-egress]
 Objects: ConfigMaps fx-gw-<N>-envoy, fx-gw-<N>-opa, fx-gw-<N>-client (client-config.yaml of the gateway's node, gateway cert, issuer-identity.bin for bi only),
-Services fx-gw-<N> (ClusterIP 8443), fx-gw-<N>-ext (NodePort, eTP Cluster, cluster-1 parties only: the Lensa path, like zeto bank-gw-<N>-ext) and one ExternalName `fx-gw-<M>` per same-cluster peer (the driver dials https://fx-gw-<M>:8443/, serve.go:43), NetworkPolicy fx-gw-<N> (ingress 8443 from any source, like zeto bank-gw-ingress: mTLS + OPA are the control),
+Services fx-gw-<N> (ClusterIP 8443), fx-gw-<N>-ext (NodePort, eTP Cluster, cluster-1 parties only: the Lensa path, like zeto bank-gw-<N>-ext) and one ExternalName `fx-gw-<M>` per same-cluster peer (the driver dials https://fx-gw-<M>:8443/, serve.go:43), NetworkPolicy fx-gw-<N> (ingress 8443 from any source, like zeto bank-gw-ingress: mTLS + OPA are the control; egress open unless --restrict-egress: DNS, own FSC node, peer gateways 8443, NOT the OPA bundle-server, see render()),
 Deployment fx-gw-<N> (envoy :8443 mTLS + ext_authz to OPA 127.0.0.1:9191, OPA bundles from the SAME party's zeto bundle-server read side only, fxapi `rdbi-driver serve <node>`).
 hostAliases carry the cross-cluster peers. The LoadBalancer Service fx-gw-<N>-lb exists only with --lb-acl (existing ACL id, /32 ranges only).
 NOT rendered, custody step (multiorg/gw/make_secrets.py): Secrets fx-gw-<N>-server (tls.crt, tls.key from the org's own TLS CA), fx-gw-<N>-client-ca (ca.crt: bank-gw-ca-<N> + the 4 TLS CAs, public),
 fx-gw-<N>-peer (tls.crt, tls.key of identity fx-gw-<N>-peer), fx-gw-<N>-client (gw.key of identity <node>-gw).
 ConfigMap fx-gw-<N>-peer-ca holds ca-1.crt..ca-4.crt (one public root per org): fxapi trusts, per peer gateway, ONLY that org's root (D4, driver peerFor).
 """
-import argparse, base64, glob, os, re, sys
+import argparse, base64, glob, ipaddress, os, re, sys
 import yaml
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 PARTY_N = {"bi": 1, "bank-a": 2, "bank-b": 3, "bank-c": 4}
 NODE = {"bi": "issuer", "bank-a": "bank2", "bank-b": "bank3", "bank-c": "bank4"}
+POD = {"bi": "bi", "bank-a": "bank2", "bank-b": "bank3", "bank-c": "bank4"}   # FSC pod rdbi-<pod> of the party (= fsc/enroll_fsc.NODES, pinned by a test)
 CLUSTER = {"bi": "cluster1", "bank-a": "cluster1", "bank-b": "cluster1", "bank-c": "cluster2"}
 UID = 10001
 HOME = "/home/rdbi"
@@ -87,7 +88,7 @@ def opa_config_for(path, party):
     return yaml.safe_dump(cfg, sort_keys=False)
 
 
-def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert, gw_ips, tls_exchange, lb=None, public_params=None):
+def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert, gw_ips, tls_exchange, lb=None, public_params=None, restrict_egress=False):
     if party not in PARTY_N:
         die(f"party {party!r} must be one of {', '.join(PARTY_N)}")
     for what, v in (("--image", image), ("--envoy-image", envoy_image), ("--opa-image", opa_image)):
@@ -201,8 +202,27 @@ def render(party, templates, image, envoy_image, opa_image, opa_config, gw_cert,
                                                                          "service.beta.kubernetes.io/backend-type": "eni"}},
                      "spec": {"type": "LoadBalancer", "externalTrafficPolicy": "Cluster", "loadBalancerSourceRanges": ranges, "selector": pl,
                               "ports": [{"name": "fxapi", "port": 8443, "targetPort": 8443, "protocol": "TCP"}]}})
-    docs.append({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(name),
-                 "spec": {"podSelector": {"matchLabels": pl}, "policyTypes": ["Ingress"], "ingress": [{"ports": [{"protocol": "TCP", "port": 8443}]}]}})
+    np = {"podSelector": {"matchLabels": pl}, "policyTypes": ["Ingress"], "ingress": [{"ports": [{"protocol": "TCP", "port": 8443}]}]}
+    if restrict_egress:
+        # R17 egress form (multiorg/test_netpol_form.py). NOT covered, deliberately: OPA pulls its bundles from http://bundle-server.rd-zeto-<party>.svc (port 80 -> pod 8080), but the pod
+        # labels of that bundle-server live in the zeto repo, not here, so no rule is invented: with this flag ON the bundle pull is blocked until the rule is added (hence opt-in).
+        sel = lambda nm: {"matchLabels": {"app.kubernetes.io/name": nm}}
+        tcp = lambda p: [{"protocol": "TCP", "port": p}]
+        egress = [{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
+                   "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
+                  {"to": [{"podSelector": sel(f"rdbi-{POD[party]}")}], "ports": tcp(grpc_port)}]   # fxapi -> the party node's view gRPC (Service <node>:<port>, same namespace)
+        for m in sorted(peers):   # the driver dials https://fx-gw-<M>:8443/ (ExternalName for the same cluster, hostAliases for the other)
+            if m in same:
+                egress.append({"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": f"rd-fabricx-{same[m]}"}}, "podSelector": sel(f"fx-gw-{m}")}], "ports": tcp(8443)})
+            else:
+                a = ips[CLUSTER[cross[m]]][m]
+                try:
+                    ipaddress.IPv4Address(a)
+                except ValueError:
+                    die(f"--gw-ips fx-gw-{m}: {a!r} is not one IPv4 address (the egress rule is a /32 host)")
+                egress.append({"to": [{"ipBlock": {"cidr": f"{a}/32"}}], "ports": tcp(8443)})
+        np.update(policyTypes=["Ingress", "Egress"], egress=egress)
+    docs.append({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy", "metadata": meta(name), "spec": np})
     return yaml.safe_dump_all(docs, sort_keys=False)
 
 
@@ -214,12 +234,13 @@ def main():
         ap.add_argument(f"--{o}")
     ap.add_argument("--lb-range", action="append", default=[])
     ap.add_argument("--public-params")
+    ap.add_argument("--restrict-egress", action="store_true", help="add the R17 egress rules (default: Ingress-only; the OPA bundle-server rule is not derivable here)")
     a = ap.parse_args()
     for o in ("templates", "image", "envoy_image", "opa_image", "opa_config", "gw_cert", "gw_ips", "tls_exchange"):
         if not getattr(a, o):
             die(f"--{o.replace('_', '-')} is required")
     lb = {"acl_id": a.lb_acl, "ranges": a.lb_range} if a.lb_acl else None
-    sys.stdout.write(render(a.party, a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, a.gw_cert, a.gw_ips, a.tls_exchange, lb, a.public_params))
+    sys.stdout.write(render(a.party, a.templates, a.image, a.envoy_image, a.opa_image, a.opa_config, a.gw_cert, a.gw_ips, a.tls_exchange, lb, a.public_params, a.restrict_egress))
 
 
 if __name__ == "__main__":

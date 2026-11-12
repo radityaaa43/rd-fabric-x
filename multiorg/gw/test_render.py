@@ -310,6 +310,54 @@ class GwRender(unittest.TestCase):
             self.assertEqual(np["spec"]["podSelector"], {"matchLabels": {"app.kubernetes.io/name": f"fx-gw-{n}"}})
             self.assertEqual(np["spec"]["ingress"], [{"ports": [{"protocol": "TCP", "port": 8443}]}])   # no from-list: mTLS + OPA are the control (zeto bank-gw-ingress)
 
+    # R17: egress is OPT-IN (restrict_egress, --restrict-egress). The default stays Ingress-only because the OPA bundle-server rule cannot be derived from the repo (see render.py).
+    def test_egress_is_off_by_default(self):
+        for p, n in PARTIES.items():
+            np = by(build(self.root, p), "NetworkPolicy", f"fx-gw-{n}")
+            self.assertEqual(np["spec"]["policyTypes"], ["Ingress"])
+            self.assertNotIn("egress", np["spec"])
+
+    def test_restricted_egress_exact_rules_for_bank_a(self):
+        np = by(build(self.root, "bank-a", restrict_egress=True), "NetworkPolicy", "fx-gw-2")["spec"]
+        self.assertEqual(np["policyTypes"], ["Ingress", "Egress"])
+        self.assertEqual(np["ingress"], [{"ports": [{"protocol": "TCP", "port": 8443}]}])
+        sel = lambda nm: {"matchLabels": {"app.kubernetes.io/name": nm}}
+        gw = lambda q, m: {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": f"rd-fabricx-{q}"}}, "podSelector": sel(f"fx-gw-{m}")}], "ports": [{"protocol": "TCP", "port": 8443}]}
+        self.assertEqual(np["egress"], [
+            {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
+             "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
+            {"to": [{"podSelector": sel("rdbi-bank2")}], "ports": [{"protocol": "TCP", "port": 5103}]},   # the node view gRPC: client-config address port
+            gw("bi", 1), gw("bank-b", 3),
+            {"to": [{"ipBlock": {"cidr": "8.8.8.4/32"}}], "ports": [{"protocol": "TCP", "port": 8443}]}])   # bank-c, cluster 2: --gw-ips
+
+    def test_restricted_egress_per_party_peers_and_form(self):
+        for p, n in PARTIES.items():
+            eg = by(build(self.root, p, restrict_egress=True), "NetworkPolicy", f"fx-gw-{n}")["spec"]["egress"]
+            text = yaml.safe_dump(eg)
+            self.assertNotIn("podSelector: {}", text)
+            self.assertNotIn("rd-zeto", text)   # the bundle-server selector is not derivable from the repo: not invented
+            same_ns = {to["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] for r in eg for to in r["to"] if "namespaceSelector" in to} - {"kube-system"}
+            blocks = [to["ipBlock"]["cidr"] for r in eg for to in r["to"] if "ipBlock" in to]
+            if p == "bank-c":
+                self.assertEqual(same_ns, set())
+                self.assertEqual(blocks, ["10.0.1.1/32", "10.0.1.2/32", "10.0.1.3/32"])
+            else:
+                self.assertEqual(same_ns, {f"rd-fabricx-{q}" for q in ("bi", "bank-a", "bank-b") if q != p})
+                self.assertEqual(blocks, ["8.8.8.4/32"])
+            for r in eg:
+                self.assertTrue(r["ports"])
+
+    def test_restricted_egress_refuses_a_gw_ip_that_is_not_one_ipv4(self):
+        with open(f"{self.root}/bad-ips.yaml", "w") as f:
+            yaml.safe_dump({"cluster1": {1: "10.0.1.0/24", 2: "10.0.1.2", 3: "10.0.1.3"}, "cluster2": {4: "8.8.8.4"}}, f)
+        with self.assertRaises(SystemExit):
+            build(self.root, "bank-c", gw_ips=f"{self.root}/bad-ips.yaml", restrict_egress=True)
+
+    def test_node_pod_name_matches_enroll_fsc(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(HERE), "fsc"))
+        import enroll_fsc
+        self.assertEqual(render.POD, {p: enroll_fsc.NODES[p][0] for p in PARTIES})
+
     def test_lensa_nodeport_on_cluster1_only(self):
         for p, n in PARTIES.items():
             ext = [d for d in build(self.root, p) if d["metadata"]["name"] == f"fx-gw-{n}-ext"]

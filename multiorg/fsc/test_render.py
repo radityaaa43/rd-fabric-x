@@ -204,6 +204,85 @@ class Network(Base):
             pc = [r for r in c["ingress"] if "fx-gw" not in str(r.get("from"))]
             self.assertEqual(pc[0]["from"], want)   # cluster 2: no namespace selector, the other cluster's egress + the CLB health check
 
+    # R17: the egress of rdbi-traffic is the narrow form (multiorg/test_netpol_form.py docstring); the old rules (podSelector {}, all ports; DNS without the CoreDNS selector;
+    # one ipBlock rule over every address and port) are gone. No earlier test pinned the egress, so none was changed.
+    def egress(self, party):
+        return self.by(self.r(party), "NetworkPolicy")["rdbi-traffic"]["spec"]["egress"]
+
+    def test_egress_exact_rules_for_bi_cluster1(self):
+        g = tcr.GRPC
+        sel = lambda nm: {"matchLabels": {"app.kubernetes.io/name": nm}}
+        tcp = lambda *ps: [{"protocol": "TCP", "port": p} for p in ps]
+        peer = lambda ns, nm, *ps: {"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": ns}}, "podSelector": sel(nm)}], "ports": tcp(*ps)}
+        want = [{"to": [{"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "kube-system"}}, "podSelector": {"matchLabels": {"k8s-app": "kube-dns"}}}],
+                 "ports": [{"protocol": "UDP", "port": 53}, {"protocol": "TCP", "port": 53}]},
+                {"to": [{"podSelector": sel("committer-sidecar")}], "ports": tcp(5130)},
+                {"to": [{"podSelector": sel("committer-query")}], "ports": tcp(5140)},
+                {"to": [{"podSelector": sel("orderer-router-1")}], "ports": tcp(8013)},
+                {"to": [{"podSelector": sel("orderer-assembler-1")}], "ports": tcp(8011)},
+                peer("rd-fabricx-bank-a", "rdbi-bank2", g["bank2"] + 1, g["endorser-2"] + 1), peer("rd-fabricx-bank-a", "orderer-router-2", 8013), peer("rd-fabricx-bank-a", "orderer-assembler-2", 8011),
+                peer("rd-fabricx-bank-b", "rdbi-bank3", g["bank3"] + 1, g["endorser-3"] + 1), peer("rd-fabricx-bank-b", "orderer-router-3", 8013), peer("rd-fabricx-bank-b", "orderer-assembler-3", 8011),
+                {"to": [{"ipBlock": {"cidr": "47.1.1.4/32"}}], "ports": tcp(g["bank4"] + 1, g["endorser-4"] + 1)},   # bank-c, cluster 2: P2P address of the peer
+                {"to": [{"ipBlock": {"cidr": "47.236.199.240/32"}}], "ports": tcp(8011, 8013)}]                      # bank-c, cluster 2: lb-4 public address (arma.IPS[cluster1][4])
+        self.assertEqual(self.egress("bi"), want)
+
+    def test_egress_exact_rules_for_bank_c_cluster2(self):
+        g = tcr.GRPC
+        sel = lambda nm: {"matchLabels": {"app.kubernetes.io/name": nm}}
+        tcp = lambda *ps: [{"protocol": "TCP", "port": p} for p in ps]
+        want_own = [{"to": [{"podSelector": sel("committer-sidecar")}], "ports": tcp(5130)}, {"to": [{"podSelector": sel("committer-query")}], "ports": tcp(5140)},
+                    {"to": [{"podSelector": sel("orderer-router-4")}], "ports": tcp(8013)}, {"to": [{"podSelector": sel("orderer-assembler-4")}], "ports": tcp(8011)}]
+        want_peers = [{"to": [{"ipBlock": {"cidr": f"{P2P['cluster2'][m]}/32"}}], "ports": tcp(g[a] + 1, g[b] + 1)} for m, a, b in ((1, "issuer", "endorser-1"), (2, "bank2", "endorser-2"), (3, "bank3", "endorser-3"))]
+        arma = [{"to": [{"ipBlock": {"cidr": f"{render.arma.IPS['cluster2'][m]}/32"}}], "ports": tcp(8011, 8013)} for m in (1, 2, 3)]
+        got = self.egress("bank-c")
+        self.assertEqual(got[1:], want_own + [x for pair in zip(want_peers, arma) for x in pair])
+        self.assertEqual(got[0]["to"][0]["podSelector"], {"matchLabels": {"k8s-app": "kube-dns"}})
+
+    def test_egress_has_no_empty_pod_selector_and_every_rule_has_ports(self):
+        for p in PARTIES:
+            for rule in self.egress(p):
+                self.assertTrue(rule["ports"], (p, rule))
+                for to in rule["to"]:
+                    self.assertNotEqual(to.get("podSelector"), {}, (p, rule))
+                    self.assertNotEqual(to.get("namespaceSelector"), {}, (p, rule))
+
+    def test_no_ipblock_for_a_same_cluster_address(self):
+        for p in PARTIES:
+            cl = "cluster2" if p == "bank-c" else "cluster1"
+            same = {m for q, m in PARTIES.items() if ("cluster2" if q == "bank-c" else "cluster1") == cl}
+            addrs = {f"{a}/32" for m in same for a in (P2P[cl][m], render.arma.IPS[cl][m])}
+            blocks = [to["ipBlock"]["cidr"] for r in self.egress(p) for to in r["to"] if "ipBlock" in to]
+            self.assertFalse(addrs & set(blocks), (p, addrs & set(blocks)))
+
+    def test_cross_cluster_ipblocks_are_host_32_on_the_peer_ports_only(self):
+        g = tcr.GRPC
+        peer_ports = {"bi": {g["issuer"] + 1, g["endorser-1"] + 1}, "bank-a": {g["bank2"] + 1, g["endorser-2"] + 1}, "bank-b": {g["bank3"] + 1, g["endorser-3"] + 1}, "bank-c": {g["bank4"] + 1, g["endorser-4"] + 1}}
+        for p in PARTIES:
+            cl = "cluster2" if p == "bank-c" else "cluster1"
+            other = [q for q in PARTIES if ("cluster2" if q == "bank-c" else "cluster1") != cl]
+            allowed = {"p2p": {P2P[cl][PARTIES[q]]: peer_ports[q] for q in other}, "arma": {render.arma.IPS[cl][PARTIES[q]]: {8011, 8013} for q in other}}
+            want = {**allowed["p2p"], **allowed["arma"]}
+            got = {}
+            for r in self.egress(p):
+                for to in r["to"]:
+                    if "ipBlock" in to:
+                        cidr = to["ipBlock"]["cidr"]
+                        self.assertTrue(cidr.endswith("/32") and set(to) == {"ipBlock"} and len(r["to"]) == 1, (p, r))
+                        got[cidr[:-3]] = {x["port"] for x in r["ports"]}
+            self.assertEqual(got, want, p)
+
+    def test_bank_c_egress_names_no_cluster1_namespace(self):
+        text = yaml.safe_dump(self.egress("bank-c"))
+        for q in ("bi", "bank-a", "bank-b"):
+            self.assertNotIn(f"rd-fabricx-{q}", text)
+        sels = [to["namespaceSelector"]["matchLabels"] for r in self.egress("bank-c") for to in r["to"] if "namespaceSelector" in to]
+        self.assertEqual(sels, [{"kubernetes.io/metadata.name": "kube-system"}])
+
+    def test_cluster1_party_selects_both_other_cluster1_namespaces_by_exact_name(self):
+        for p in ("bi", "bank-a", "bank-b"):
+            names = {to["namespaceSelector"]["matchLabels"]["kubernetes.io/metadata.name"] for r in self.egress(p) for to in r["to"] if "namespaceSelector" in to}
+            self.assertEqual(names, {"kube-system", *(f"rd-fabricx-{q}" for q in ("bi", "bank-a", "bank-b") if q != p)})
+
     def test_no_p2p_service_by_default_and_flag_makes_a_cluster_policy_acl_service(self):
         self.assertNotIn("rdbi-p2p-bank2", self.by(self.r("bank-a"), "Service"))
         docs = self.r("bank-a", p2p_lb={"acl_id": "acl-d9ji5nwbqutwulof33ydb", "ranges": ["1.2.3.4/32"]})

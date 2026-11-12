@@ -37,7 +37,7 @@ Trust bundle = Lensa CA + 4 TLS CAs, so any org CA can mint `CN=fx-gw-1`. Envoy 
 ## Unverified
 - fxapi needs `HOME` writable (emptyDir `/home/rdbi`) and the files under `$HOME/.fabricx-token/{live,gw}` read-only; no start-up of `rdbi-driver serve` was tried with this layout.
 - Whether the rdbi-node image carries `bash` for the fxapi readiness probe (old form used it).
-- NetworkPolicy is ingress-only; egress of the gateway pod is open (OPA to the bundle-server, fxapi to `<node>`, peers).
+- NetworkPolicy is ingress-only by default; egress of the gateway pod is open (OPA to the bundle-server, fxapi to `<node>`, peers). `--restrict-egress` (R17) renders the egress form (DNS, own `rdbi-<pod>` node view gRPC, peer `fx-gw-<M>` 8443) but NOT the OPA bundle-server rule (its pod labels are in the zeto repo, not here): ON, the bundle pull is blocked until that rule exists.
 - The node still lists the `<node>-admin` cert in `fsc.client.certs` until the S16 field-change line swaps it for the `<node>-gw` cert.
 
 ## Known gap closed by D4 (needs the rebuilt image)
