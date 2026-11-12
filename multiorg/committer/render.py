@@ -26,6 +26,7 @@ PG_UID, UID = 999, arma.UID   # postgres image user (k8s.py: runAsUser 999); com
 SERVICES = {"verifier": (5110, 5210), "vc": (5100, 5200), "coordinator": (5120, 5220), "sidecar": (5130, 5230), "query": (5140, 5240)}
 CONFIGS = list(SERVICES)
 # [unverified] first-guess sizes, to be settled by the first run
+R22_STATE = ("committer-db", "committer-sidecar")   # the pods with RWO disks; R22 REQUIRED anti-affinity only for these
 RES_COMMITTER = {"requests": {"cpu": "50m", "memory": "64Mi", "ephemeral-storage": "64Mi"}, "limits": {"cpu": "1", "memory": "512Mi", "ephemeral-storage": "512Mi"}}
 RES_DB = {"requests": {"cpu": "100m", "memory": "128Mi", "ephemeral-storage": "64Mi"}, "limits": {"cpu": "1", "memory": "1Gi", "ephemeral-storage": "512Mi"}}
 ASSEMBLER_PORT = arma.PORT_PLAN["assembler"]
@@ -137,9 +138,13 @@ def render(party, image=COMMITTER_IMAGE, pg_image=PG_IMAGE, zone=None, storage_c
             {"key": "kubernetes.io/hostname", "operator": "NotIn", "values": list(arma.AVOID_NODES)}]}]}}}
 
     def workload(kind, name, containers, volumes, uid, claims=None, extra_spec=None):
-        labels = {**base, "app.kubernetes.io/name": name, "rd/role": "fabricx-committer"}
+        state = name in R22_STATE   # R22: REQUIRED only for the state holders (RWO disks); the stateless helpers are PREFERRED (orchestrator 2026-11-12)
+        role = "committer" if state else "committer-helper"
+        labels = {**base, "app.kubernetes.io/name": name, "rd/role": f"fabricx-{role}"}
         pl = copy.deepcopy(place)
-        pl.setdefault("affinity", {})["podAntiAffinity"] = {"requiredDuringSchedulingIgnoredDuringExecution": [arma.role_anti_affinity("committer", party)]}   # R22
+        term = arma.role_anti_affinity(role, party)
+        pl.setdefault("affinity", {})["podAntiAffinity"] = ({"requiredDuringSchedulingIgnoredDuringExecution": [term]} if state
+                                                            else {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": 100, "podAffinityTerm": term}]})
         spec = {"replicas": 1, "selector": {"matchLabels": {"app.kubernetes.io/name": name}},
                 "template": {"metadata": {"labels": labels}, "spec": {
                     "securityContext": {"runAsNonRoot": True, "runAsUser": uid, "fsGroup": uid, "seccompProfile": {"type": "RuntimeDefault"}},

@@ -394,14 +394,20 @@ class Placement(Base):
                 for x in w["spec"].get("volumeClaimTemplates", []):
                     self.assertEqual(x["spec"]["storageClassName"], "alicloud-essd-wffc")
                 self.assertEqual({a["ip"] for a in spec.get("hostAliases", [])}, set(C1.values()) if n == "committer-sidecar" else set())
-    def test_r22_committer_pods_never_share_a_worker_with_another_party_committer(self):
+    def test_r22_committer_state_holders_required_helpers_preferred(self):
+        # orchestrator 2026-11-12: REQUIRED only for the state holders (committer-db, committer-sidecar: RWO disks), the stateless helpers PREFERRED
         for party in ("bi", "bank-a", "bank-b", "bank-c"):
             ws = self.workloads(party)
-            self.assertTrue(ws)
+            self.assertEqual(set(ws), {"committer-db", "committer-sidecar", "committer-coordinator", "committer-query", "committer-vc", "committer-verifier"})
             for n, w in ws.items():
                 t = w["spec"]["template"]
-                self.assertEqual(t["metadata"]["labels"]["rd/role"], "fabricx-committer", n)
-                self.assertEqual(t["spec"]["affinity"]["podAntiAffinity"]["requiredDuringSchedulingIgnoredDuringExecution"], [r22_term("committer", party)], n)
+                aa = t["spec"]["affinity"]["podAntiAffinity"]
+                if n in ("committer-db", "committer-sidecar"):
+                    self.assertEqual(t["metadata"]["labels"]["rd/role"], "fabricx-committer", n)
+                    self.assertEqual(aa, {"requiredDuringSchedulingIgnoredDuringExecution": [r22_term("committer", party)]}, n)
+                else:
+                    self.assertEqual(t["metadata"]["labels"]["rd/role"], "fabricx-committer-helper", n)
+                    self.assertEqual(aa, {"preferredDuringSchedulingIgnoredDuringExecution": [{"weight": 100, "podAffinityTerm": r22_term("committer-helper", party)}]}, n)
                 self.assertEqual("nodeAffinity" in t["spec"]["affinity"], party != "bank-c", n)   # cluster-1 AVOID_NODES stay; cluster 2 has none
 
 
