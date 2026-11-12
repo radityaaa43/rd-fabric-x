@@ -162,6 +162,21 @@ class Form(unittest.TestCase):
         for p in ct.PARTIES:
             self.assertEqual(open_pods(t.docs(p)), self.KNOWN_OPEN_SECRET_PODS, p)
 
+    def test_gateway_ingress_narrowing_has_only_selector_pairs_and_bounded_blocks(self):
+        """--restrict-ingress (analyst HIGH): every `from` of the gateway ingress is a namespace(exact name)+pod(matchLabels) pair or an ipBlock /10../32, never an empty selector or 0.0.0.0/0."""
+        gt = load("gw/test_render.py", "gw_test_render_ing")
+        with tempfile.TemporaryDirectory() as root:
+            gt.make_inputs(root)
+            for p in gt.PARTIES:
+                np = [d for d in gt.build(root, p, restrict_egress=True, ingress_allow=["nspod=rd-lensa/role=flow", "ip=100.64.0.0/10"]) if d["kind"] == "NetworkPolicy"][0]["spec"]
+                for rule in np["ingress"]:
+                    self.assertTrue(rule["ports"])
+                    for f in rule["from"]:
+                        if "ipBlock" in f:
+                            cidr = f["ipBlock"]["cidr"]; self.assertNotEqual(cidr.split("/")[0], "0.0.0.0"); self.assertTrue(10 <= int(cidr.split("/")[1]) <= 32, cidr)
+                        else:
+                            self.assertTrue(f["namespaceSelector"]["matchLabels"].get("kubernetes.io/metadata.name") and f["podSelector"].get("matchLabels") and not f["podSelector"].get("matchExpressions"), f)
+
     def test_the_checker_catches_the_old_forms(self):
         for bad in ({"podSelector": {}}, {"namespaceSelector": {}}, {"namespaceSelector": {"matchLabels": {"part-of": "rd-fabricx"}}, "podSelector": {"matchLabels": {"a": "b"}}},
                     {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "x"}}}, {"ipBlock": {"cidr": "10.0.0.0/24"}}, {"ipBlock": {"cidr": "0.0.0.0/0"}},

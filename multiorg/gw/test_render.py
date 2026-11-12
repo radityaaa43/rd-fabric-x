@@ -350,6 +350,43 @@ class GwRender(unittest.TestCase):
             for r in eg:
                 self.assertTrue(r["ports"])
 
+    # Ingress narrowing (analyst condition 3, HIGH): ports-only ingress admits ANY source. Opt-in `ingress_allow`: peers of the same cluster (namespace + pod), the extra specs (Lensa pods, the SLB source range for LB/eni traffic).
+    LENSA = "nspod=rd-lensa/role=flow"
+    SLB = "ip=100.64.0.0/10"
+
+    def ing(self, p, specs):
+        return by(build(self.root, p, ingress_allow=specs), "NetworkPolicy", f"fx-gw-{PARTIES[p]}")["spec"]
+
+    def test_ingress_is_ports_only_by_default(self):
+        np = by(build(self.root, "bank-a"), "NetworkPolicy", "fx-gw-2")["spec"]
+        self.assertEqual(np["ingress"], [{"ports": [{"protocol": "TCP", "port": 8443}]}])
+
+    def test_restricted_ingress_exact_rules_for_bank_a(self):
+        np = self.ing("bank-a", [self.LENSA, self.SLB])
+        self.assertEqual(np["policyTypes"], ["Ingress"])
+        sel = lambda nm: {"matchLabels": {"app.kubernetes.io/name": nm}}
+        self.assertEqual(np["ingress"], [{"from": [
+            {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "rd-fabricx-bi"}}, "podSelector": sel("fx-gw-1")},
+            {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "rd-fabricx-bank-b"}}, "podSelector": sel("fx-gw-3")},
+            {"namespaceSelector": {"matchLabels": {"kubernetes.io/metadata.name": "rd-lensa"}}, "podSelector": {"matchLabels": {"role": "flow"}}},
+            {"ipBlock": {"cidr": "100.64.0.0/10"}}], "ports": [{"protocol": "TCP", "port": 8443}]}])
+
+    def test_bank_c_has_no_same_cluster_gateway_peer_and_keeps_only_the_given_sources(self):
+        np = self.ing("bank-c", [self.SLB])
+        self.assertEqual(np["ingress"], [{"from": [{"ipBlock": {"cidr": "100.64.0.0/10"}}], "ports": [{"protocol": "TCP", "port": 8443}]}])
+
+    def test_restricted_ingress_never_has_an_empty_selector_or_a_wide_block(self):
+        for p in PARTIES:
+            text = yaml.safe_dump(self.ing(p, [self.LENSA, self.SLB])["ingress"])
+            self.assertNotIn("podSelector: {}", text); self.assertNotIn("namespaceSelector: {}", text); self.assertNotIn("0.0.0.0/0", text)
+        for bad in (["ip=0.0.0.0/0"], ["ip=10.0.0.0/8"], ["ip=100.64.0.0/9"], ["nspod=rd-lensa/"], ["nspod=/role=flow"], ["nspod=rd-lensa/role"], ["bogus"], ["ip=300.1.1.1/32"], ["nspod=Rd Lensa/role=flow"]):
+            with self.subTest(bad=bad), self.assertRaises(SystemExit):
+                build(self.root, "bank-a", ingress_allow=bad)
+
+    def test_restricted_ingress_with_no_extra_source_is_peers_only(self):
+        np = self.ing("bi", [])
+        self.assertEqual(len(np["ingress"][0]["from"]), 2); self.assertTrue(all("podSelector" in f and "namespaceSelector" in f for f in np["ingress"][0]["from"]))
+
     def test_restricted_egress_refuses_a_gw_ip_that_is_not_one_ipv4(self):
         with open(f"{self.root}/bad-ips.yaml", "w") as f:
             yaml.safe_dump({"cluster1": {1: "10.0.1.0/24", 2: "10.0.1.2", 3: "10.0.1.3"}, "cluster2": {4: "8.8.8.4"}}, f)
