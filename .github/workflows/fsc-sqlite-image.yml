@@ -53,27 +53,40 @@ jobs:
           tags: ghcr.io/${{ github.repository_owner }}/fsc-sqlite-ci:sha-${{ github.sha }}
           sbom: true
           provenance: mode=max
-      # GAP (recorded): no signed attestation for a user-owned private repository (run 43083952563: 'Feature not available for user-owned private repositories').
+      - name: Assert the package is private
+        env:
+          PKG: fsc-sqlite-ci
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          # public repo rule: the pushed package must NOT be pullable anonymously. Private = refused (401/403); 200, 404, 5xx or no answer fails the job (fail closed: an unknown package answers 403 at the token endpoint and 404 at the manifest).
+          owner="${GITHUB_REPOSITORY_OWNER,,}"
+          tok="$(curl -sS -m 30 "https://ghcr.io/token?scope=repository:${owner}/${PKG}:pull" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("token", ""))')"
+          code="$(curl -s -m 30 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${tok}" -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' "https://ghcr.io/v2/${owner}/${PKG}/manifests/${DIGEST}")"
+          echo "anonymous manifest request for ${PKG}: HTTP ${code}"
+          case "${code}" in
+            401|403) echo "package ${PKG} is private" ;;
+            *) echo "package ${PKG} is PUBLIC or unverifiable (HTTP ${code}): set it to private in the package settings"; exit 1 ;;
+          esac
+      - name: Pull test by digest (authenticated, fail-closed)
+        env:
+          PKG: fsc-sqlite-ci
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          # the anonymous assert above proves only "not public" (an unknown package answers like a private one); that the image EXISTS is proven only by this authenticated pull of repo@digest.
+          # The runner is logged in to ghcr.io already. The imageID must equal the pushed digest; it is printed so the later GO text can quote it.
+          set -euo pipefail
+          ref="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/${PKG}@${DIGEST}"
+          docker pull "$ref"
+          id="$(docker image inspect "$ref" --format '{{.Id}}')"
+          echo "pulled ${ref} imageID ${id}" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$id" = "$DIGEST"
+      # the repository is public, so the signed attestation is available (job permissions id-token + attestations)
       - if: ${{ github.event.repository.private == false }}
         uses: actions/attest-build-provenance@c074443f1aee8d4aeeae555aebba3282517141b2 # v2.2.3
         with:
           subject-name: ghcr.io/${{ github.repository_owner }}/fsc-sqlite-ci
           subject-digest: ${{ steps.build.outputs.digest }}
           push-to-registry: true
-      - name: Assert the package is private
-        env:
-          PKG: fsc-sqlite-ci
-          DIGEST: ${{ steps.build.outputs.digest }}
-        run: |
-          # public repo rule: the pushed package must NOT be pullable anonymously. Private = refused (401/403/404); 200, 5xx or no answer fails the job (fail closed).
-          owner="${GITHUB_REPOSITORY_OWNER,,}"
-          tok="$(curl -sS -m 30 "https://ghcr.io/token?scope=repository:${owner}/${PKG}:pull" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("token", ""))')"
-          code="$(curl -s -m 30 -o /dev/null -w '%{http_code}' -H "Authorization: Bearer ${tok}" -H 'Accept: application/vnd.oci.image.index.v1+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json' "https://ghcr.io/v2/${owner}/${PKG}/manifests/${DIGEST}")"
-          echo "anonymous manifest request for ${PKG}: HTTP ${code}"
-          case "${code}" in
-            401|403|404) echo "package ${PKG} is private" ;;
-            *) echo "package ${PKG} is PUBLIC or unverifiable (HTTP ${code}): set it to private in the package settings"; exit 1 ;;
-          esac
       - name: Report the digest
         run: |
           { echo "image: ghcr.io/${{ github.repository_owner }}/fsc-sqlite-ci@${{ steps.build.outputs.digest }}"; echo "SBOM + BuildKit provenance attached; no signed attestation (private user repository)"; } | tee -a "$GITHUB_STEP_SUMMARY"
